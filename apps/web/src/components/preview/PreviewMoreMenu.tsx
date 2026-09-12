@@ -48,6 +48,12 @@ interface Props {
   deviceToolbarVisible: boolean;
   /** Switches between fill-panel mode and a fixed responsive viewport. */
   onToggleDeviceToolbar: () => void;
+  onOpenInBrowser: () => void;
+  openInBrowserDisabled: boolean;
+  /** Floating preview inside the chat window. */
+  pictureInPicture: boolean;
+  onPictureInPicture: () => void;
+  pictureInPictureDisabled: boolean;
   /** Whether the separate native always-on-top preview window is open. */
   nativePictureInPicture: boolean;
   /** Toggles the optional native always-on-top preview window. */
@@ -77,6 +83,11 @@ export function PreviewMoreMenu({
   colorScheme,
   deviceToolbarVisible,
   onToggleDeviceToolbar,
+  onOpenInBrowser,
+  openInBrowserDisabled,
+  pictureInPicture,
+  onPictureInPicture,
+  pictureInPictureDisabled,
   nativePictureInPicture,
   onNativePictureInPicture,
   environmentId,
@@ -115,10 +126,16 @@ export function PreviewMoreMenu({
         <MenuItem onClick={callTab(bridge.openDevTools)} disabled={tabDisabled}>
           Open DevTools
         </MenuItem>
+        <MenuItem onClick={onPictureInPicture} disabled={pictureInPictureDisabled}>
+          {pictureInPicture ? "Close floating preview" : "Float preview over chat"}
+        </MenuItem>
         <MenuItem onClick={onNativePictureInPicture} disabled={tabDisabled}>
           {nativePictureInPicture
             ? "Close separate preview window"
             : "Open separate preview window"}
+        </MenuItem>
+        <MenuItem onClick={onOpenInBrowser} disabled={openInBrowserDisabled}>
+          Open in system browser
         </MenuItem>
         <MenuItem onClick={onToggleDeviceToolbar} disabled={tabDisabled}>
           {deviceToolbarVisible ? "Hide device toolbar" : "Show device toolbar"}

@@ -1,11 +1,12 @@
-import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
   ArrowLeft,
   ArrowRight,
   Camera,
-  ExternalLink,
   MousePointerClick,
-  PictureInPicture2,
+  Bot,
+  Hand,
+  RefreshCw,
+  Square,
 } from "lucide-react";
 import {
   type FormEvent,
@@ -20,6 +21,7 @@ import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "~/components/ui/input-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
+import type { BrowserController } from "./agentBrowserCursorLogic";
 
 interface Props {
   url: string;
@@ -34,14 +36,10 @@ interface Props {
   onForward: () => void;
   onRefresh: () => void;
   onSubmit: (url: string) => void;
-  /** When provided, renders an "Open in browser" affordance to the right. */
-  onOpenInBrowser?: (() => void) | undefined;
   onCapture?: ((record: boolean) => void) | undefined;
   captureDisabled?: boolean | undefined;
   recording?: boolean | undefined;
-  onPictureInPicture?: (() => void) | undefined;
-  pictureInPicture?: boolean | undefined;
-  pictureInPictureDisabled?: boolean | undefined;
+  controller?: BrowserController;
   /**
    * When provided, renders an annotation-mode toggle button to the right of
    * the URL input. Pressed while annotation mode is active (button shows in `pressed`
@@ -64,8 +62,6 @@ interface Props {
   leadingActions?: ReactNode;
 }
 
-const NOOP = () => {};
-
 export function PreviewChromeRow({
   url,
   loading,
@@ -78,13 +74,10 @@ export function PreviewChromeRow({
   onForward,
   onRefresh,
   onSubmit,
-  onOpenInBrowser,
   onCapture,
   captureDisabled,
   recording,
-  onPictureInPicture,
-  pictureInPicture,
-  pictureInPictureDisabled,
+  controller = "none",
   onPickElement,
   pickActive,
   pickDisabled,
@@ -93,6 +86,8 @@ export function PreviewChromeRow({
   leadingActions,
 }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const controllerLabel =
+    controller === "agent" ? "Agent controlling browser" : "You control the browser";
   const [draft, setDraft] = useState(url);
   const [inputFocused, setInputFocused] = useState(false);
 
@@ -112,7 +107,7 @@ export function PreviewChromeRow({
   };
 
   return (
-    <div className="relative">
+    <div className="@container/preview-chrome relative">
       <form
         onSubmit={submit}
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:h-7 in-data-[preview-panel-mode=inline]:min-h-7 in-data-[preview-panel-mode=inline]:border-b-transparent"
@@ -125,7 +120,7 @@ export function PreviewChromeRow({
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  onClick={canGoBack ? onBack : NOOP}
+                  onClick={onBack}
                   disabled={!canGoBack}
                   aria-label="Back"
                   type="button"
@@ -142,7 +137,7 @@ export function PreviewChromeRow({
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  onClick={canGoForward ? onForward : NOOP}
+                  onClick={onForward}
                   disabled={!canGoForward}
                   aria-label="Forward"
                   type="button"
@@ -159,33 +154,57 @@ export function PreviewChromeRow({
                 <Button
                   variant="ghost"
                   size="icon-xs"
-                  onClick={refreshDisabled ? NOOP : onRefresh}
+                  onClick={onRefresh}
                   disabled={refreshDisabled}
-                  aria-label={loading ? "Stop" : "Refresh"}
+                  aria-label="Refresh"
                   type="button"
                 />
               }
             >
-              <RefreshIcon refreshing={loading} />
+              <RefreshCw />
             </TooltipTrigger>
-            <TooltipPopup>{loading ? "Loading…" : "Refresh"}</TooltipPopup>
+            <TooltipPopup>Refresh</TooltipPopup>
           </Tooltip>
         </div>
 
         {leadingActions}
 
-        <InputGroup variant="ghost" className="group/address h-7 flex-1">
+        <InputGroup variant="ghost" className="h-7 flex-1 bg-muted/40">
+          {controller !== "none" ? (
+            <InputGroupAddon align="inline-start" className="cursor-default pe-0">
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span
+                      tabIndex={0}
+                      role="status"
+                      className={cn(
+                        "flex items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        controller === "agent" && "bg-primary/10 text-primary",
+                      )}
+                    />
+                  }
+                  aria-label={controllerLabel}
+                >
+                  {controller === "agent" ? (
+                    <Bot className="size-3.5 text-primary" />
+                  ) : (
+                    <Hand className="size-3.5" />
+                  )}
+                  <span className="hidden @min-[480px]/preview-chrome:inline">
+                    {controller === "agent" ? "Agent" : "You"}
+                  </span>
+                </TooltipTrigger>
+                <TooltipPopup>{controllerLabel}</TooltipPopup>
+              </Tooltip>
+            </InputGroupAddon>
+          ) : null}
           <Tooltip>
             <TooltipTrigger
               render={
                 <InputGroupInput
                   ref={inputRef}
                   value={inputFocused ? draft : url}
-                  className={cn(
-                    onOpenInBrowser &&
-                      !inputFocused &&
-                      "group-hover/address:pe-7 transition-[padding]",
-                  )}
                   onChange={(event) => setDraft(event.target.value)}
                   onFocus={() => {
                     setDraft(url);
@@ -204,6 +223,7 @@ export function PreviewChromeRow({
                     }
                   }}
                   placeholder="Search or enter URL"
+                  aria-label="Page address"
                   spellCheck={false}
                   disabled={inputDisabled}
                   data-preview-url-input
@@ -212,29 +232,6 @@ export function PreviewChromeRow({
               }
             />
           </Tooltip>
-          {onOpenInBrowser && !inputFocused ? (
-            <InputGroupAddon
-              align="inline-end"
-              className="pointer-events-none absolute inset-y-0 right-0 opacity-0 transition-opacity group-hover/address:pointer-events-auto group-hover/address:opacity-100"
-            >
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      onClick={onOpenInBrowser}
-                      aria-label="Open in system browser"
-                      type="button"
-                    />
-                  }
-                >
-                  <ExternalLink />
-                </TooltipTrigger>
-                <TooltipPopup>Open in system browser</TooltipPopup>
-              </Tooltip>
-            </InputGroupAddon>
-          ) : null}
         </InputGroup>
 
         {onPickElement ? (
@@ -278,37 +275,10 @@ export function PreviewChromeRow({
                 />
               }
             >
-              <Camera className={cn(recording && "text-destructive")} />
-              {recording ? (
-                <span className="absolute right-0.5 top-0.5 size-1.5 animate-status-pulse rounded-full bg-destructive" />
-              ) : null}
+              {recording ? <Square className="size-3 fill-current text-destructive" /> : <Camera />}
             </TooltipTrigger>
             <TooltipPopup>
               {recording ? "Stop recording" : "Screenshot · Shift-click to record"}
-            </TooltipPopup>
-          </Tooltip>
-        ) : null}
-        {onPictureInPicture ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant={pictureInPicture ? "secondary" : "ghost"}
-                  size="icon-xs"
-                  onClick={onPictureInPicture}
-                  aria-label={
-                    pictureInPicture ? "Close floating preview" : "Float preview over chat"
-                  }
-                  aria-pressed={pictureInPicture ? "true" : "false"}
-                  type="button"
-                  disabled={pictureInPictureDisabled}
-                />
-              }
-            >
-              <PictureInPicture2 className={cn(pictureInPicture && "text-primary")} />
-            </TooltipTrigger>
-            <TooltipPopup>
-              {pictureInPicture ? "Close floating preview" : "Float preview over chat"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -318,7 +288,6 @@ export function PreviewChromeRow({
         aria-hidden
         data-loading={loading}
         className="preview-loading-progress pointer-events-none absolute bottom-0 left-0 z-10 h-0.5 w-full origin-left rounded-r-full bg-primary"
-        style={{ boxShadow: "0 0 6px 1px var(--color-ring)" }}
       />
     </div>
   );

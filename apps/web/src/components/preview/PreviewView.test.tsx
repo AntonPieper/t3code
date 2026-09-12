@@ -7,11 +7,19 @@ import {
   FILL_PREVIEW_VIEWPORT,
   ThreadId,
 } from "@t3tools/contracts";
-import { act, Profiler } from "react";
+import { act, Profiler, type ComponentProps } from "react";
+import { create, type ReactTestRenderer } from "react-test-renderer";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
+  hostingClientId: undefined as string | undefined,
+  profileId: undefined as string | undefined,
+  openPreviewSession: vi.fn(),
+  closePreview: vi.fn(),
+  openRightPanel: vi.fn(),
   navigate: vi.fn(async (_tabId: string, _url: string): Promise<void> => undefined),
   rememberPreviewUrl: vi.fn(),
   readPreparedConnection: vi.fn(() => ({ httpBaseUrl: "http://172.25.85.75:3773" })),
@@ -124,6 +132,8 @@ vi.mock("~/previewStateStore", () => ({
           "tab-1": {
             threadId: "thread-1",
             tabId: "tab-1",
+            hostingClientId: mocks.hostingClientId,
+            profileId: mocks.profileId,
             navStatus: {
               _tag: "Success",
               url: "http://example.com/",
@@ -143,11 +153,11 @@ vi.mock("~/state/environments", () => ({
 }));
 
 vi.mock("~/state/preview", () => ({
-  previewEnvironment: { open: {}, resize: {} },
+  previewEnvironment: { open: {}, close: "close", resize: {} },
 }));
 
 vi.mock("~/state/use-atom-command", () => ({
-  useAtomCommand: () => vi.fn(),
+  useAtomCommand: (command: unknown) => (command === "close" ? mocks.closePreview : vi.fn()),
 }));
 
 vi.mock("~/browser/browserRecording", () => ({
@@ -195,7 +205,7 @@ vi.mock("~/previewMiniPlayerStore", () => {
 
 vi.mock("~/rightPanelStore", () => ({
   useRightPanelStore: {
-    getState: () => ({ close: mocks.closeRightPanel }),
+    getState: () => ({ close: mocks.closeRightPanel, openBrowser: mocks.openRightPanel }),
   },
 }));
 
@@ -215,6 +225,14 @@ vi.mock("./previewBridge", () => ({
   },
 }));
 
+vi.mock("./previewAutomationClientId", () => ({
+  getPreviewAutomationClientId: () => "this-desktop",
+}));
+vi.mock("./openPreviewSession", () => ({ openPreviewSession: mocks.openPreviewSession }));
+vi.mock("~/components/ui/button", () => ({
+  Button: (props: ComponentProps<"button">) => <button {...props} />,
+}));
+
 vi.mock("./PreviewChromeRow", () => ({
   PreviewChromeRow: (props: {
     onSubmit: (url: string) => void;
@@ -222,15 +240,19 @@ vi.mock("./PreviewChromeRow", () => ({
     onPictureInPicture?: () => void;
     pictureInPicture?: boolean;
     trailingActions?: {
-      props: { onNativePictureInPicture?: () => void };
+      props: {
+        onNativePictureInPicture?: () => void;
+        onPictureInPicture?: () => void;
+        pictureInPicture?: boolean;
+      };
     };
   }) => {
     mocks.submittedUrl = props.onSubmit;
     mocks.toggleAnnotation = props.onPickElement ?? null;
-    mocks.togglePictureInPicture = props.onPictureInPicture ?? null;
+    mocks.togglePictureInPicture = props.trailingActions?.props.onPictureInPicture ?? null;
     mocks.toggleNativePictureInPicture =
       props.trailingActions?.props.onNativePictureInPicture ?? null;
-    mocks.pictureInPicturePressed = props.pictureInPicture ?? false;
+    mocks.pictureInPicturePressed = props.trailingActions?.props.pictureInPicture ?? false;
     return null;
   },
 }));
@@ -304,6 +326,7 @@ class TestNode {
   addEventListener() {}
   removeEventListener() {}
   setAttribute() {}
+  removeAttribute() {}
 }
 
 function installTestDom() {
@@ -327,6 +350,12 @@ function installTestDom() {
 
 describe("PreviewView navigation", () => {
   beforeEach(() => {
+    mocks.hostingClientId = undefined;
+    mocks.profileId = undefined;
+    mocks.openPreviewSession.mockReset();
+    mocks.closePreview.mockReset();
+    mocks.closePreview.mockResolvedValue(AsyncResult.success(undefined));
+    mocks.openRightPanel.mockClear();
     mocks.navigate.mockClear();
     mocks.rememberPreviewUrl.mockClear();
     mocks.readPreparedConnection.mockClear();
@@ -352,6 +381,104 @@ describe("PreviewView navigation", () => {
     mocks.showEmptyState = false;
     mocks.loading = false;
     mocks.recordVisitForThread.mockClear();
+  });
+
+  describe("reopening on this desktop", () => {
+    let renderer: ReactTestRenderer | undefined;
+    const replacement = { tabId: "replacement" };
+
+    async function renderHandoff() {
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      mocks.hostingClientId = "other-desktop";
+      await act(() => {
+        renderer = create(<PreviewView threadRef={TEST_THREAD_REF} tabId="tab-1" visible />);
+      });
+      return renderer!.root.findByType("button").props as {
+        onClick: () => void;
+        disabled: boolean;
+      };
+    }
+
+    afterEach(async () => {
+      if (renderer) await act(() => renderer!.unmount());
+      renderer = undefined;
+      vi.unstubAllGlobals();
+    });
+
+    it.each([undefined, "work"])(
+      "opens once before closing and preserves profile %s",
+      async (profileId) => {
+        mocks.profileId = profileId;
+        let finishOpening = () => {};
+        const opening = new Promise<void>((resolve) => {
+          finishOpening = resolve;
+        });
+        mocks.openPreviewSession.mockImplementation(async () => {
+          await opening;
+          return AsyncResult.success(replacement);
+        });
+        const action = await renderHandoff();
+
+        await act(() => {
+          action.onClick();
+          action.onClick();
+        });
+        expect(mocks.openPreviewSession).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            url: "http://example.com/",
+            profileId: profileId ?? DEFAULT_BROWSER_PROFILE_ID,
+            viewport: FILL_PREVIEW_VIEWPORT,
+          }),
+        );
+        expect(mocks.closePreview).not.toHaveBeenCalled();
+        expect(renderer!.root.findByType("button").props.disabled).toBe(true);
+
+        await act(async () => {
+          finishOpening();
+        });
+        expect(mocks.openRightPanel).toHaveBeenCalledWith(TEST_THREAD_REF, "replacement");
+        expect(mocks.closePreview).toHaveBeenCalledExactlyOnceWith({
+          environmentId: TEST_THREAD_REF.environmentId,
+          input: { threadId: TEST_THREAD_REF.threadId, tabId: "tab-1" },
+        });
+      },
+    );
+
+    it("keeps the original and permits retry if opening fails", async () => {
+      mocks.openPreviewSession.mockResolvedValueOnce(
+        AsyncResult.failure(Cause.fail(new Error("offline"))),
+      );
+      mocks.openPreviewSession.mockResolvedValueOnce(AsyncResult.success(replacement));
+      const action = await renderHandoff();
+      await act(async () => {
+        action.onClick();
+      });
+      expect(mocks.closePreview).not.toHaveBeenCalled();
+      expect(mocks.openRightPanel).not.toHaveBeenCalled();
+      expect(toastManager.add).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Could not reopen this page" }),
+      );
+      expect(renderer!.root.findByType("button").props.disabled).toBe(false);
+
+      await act(async () => {
+        action.onClick();
+      });
+      expect(mocks.closePreview).toHaveBeenCalledTimes(1);
+      expect(mocks.openRightPanel).toHaveBeenCalledWith(TEST_THREAD_REF, "replacement");
+    });
+
+    it("keeps the replacement visible and reports failure to close the original", async () => {
+      mocks.openPreviewSession.mockResolvedValue(AsyncResult.success(replacement));
+      mocks.closePreview.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("offline"))));
+      const action = await renderHandoff();
+      await act(async () => {
+        action.onClick();
+      });
+      expect(mocks.openRightPanel).toHaveBeenCalledWith(TEST_THREAD_REF, "replacement");
+      expect(toastManager.add).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "The other tab could not be closed" }),
+      );
+    });
   });
 
   it("does not rerender while loading time passes", async () => {

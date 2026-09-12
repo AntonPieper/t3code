@@ -74,10 +74,10 @@ describe("PreviewEmptyState", () => {
     expect(html).not.toContain("Local servers");
   });
 
-  it("keeps the original empty state when both groups are empty", () => {
+  it("shows address guidance when both groups are empty", () => {
     mocks.servers = [];
     const html = render([]);
-    expect(html).toContain("No preview yet");
+    expect(html).toContain("Open a page");
   });
 
   it("renders an out-of-range lastVisitedAt entry without throwing", () => {

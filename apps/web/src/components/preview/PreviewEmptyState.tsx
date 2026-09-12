@@ -1,9 +1,7 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
-import { Globe, History, RadioTower } from "lucide-react";
+import { Globe } from "lucide-react";
 
 import type { BrowserHistoryEntry } from "~/browserHistoryStore";
-import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from "~/components/ui/empty";
-import { DiscoveryList } from "../ui/discovery-list";
 
 import { PreviewLocalServerCard } from "./PreviewLocalServerCard";
 import { PreviewRecentUrlCard } from "./PreviewRecentUrlCard";
@@ -34,29 +32,42 @@ export function PreviewEmptyState({
 
   if (servers.length === 0 && recents.length === 0) {
     return (
-      <Empty>
-        <EmptyMedia variant="icon">
-          <Globe className="size-4.5 text-muted-foreground" />
-        </EmptyMedia>
-        <EmptyTitle>No preview yet</EmptyTitle>
-        <EmptyDescription>
-          Type a URL above, or run a dev script. Browser-ready localhost servers will show up here
-          automatically.
-        </EmptyDescription>
-      </Empty>
+      <div className="flex h-full items-start justify-center overflow-y-auto px-6 py-12">
+        <div className="flex w-full max-w-sm flex-col items-start gap-4">
+          <Globe className="size-6 text-muted-foreground" aria-hidden />
+          <div className="space-y-2">
+            <h2 className="text-base font-medium">Open a page</h2>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Enter an address above, or start your app. Available local servers will appear here.
+            </p>
+          </div>
+        </div>
+      </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 overflow-y-auto px-5 py-8">
+    <div className="h-full min-h-0 overflow-y-auto px-4 py-6">
       <div className="mx-auto flex w-full max-w-xl flex-col gap-6">
-        {recents.length > 0 ? (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <History className="size-4 shrink-0" />
-              <h2 className="font-medium">Recently used</h2>
+        {servers.length > 0 ? (
+          <section className="space-y-2" aria-label="Local servers">
+            <h2 className="px-2 text-xs font-medium text-muted-foreground">Local servers</h2>
+            <div className="flex flex-col">
+              {servers.map((server) => (
+                <PreviewLocalServerCard
+                  key={`${server.host}:${server.port}`}
+                  threadRef={threadRef}
+                  server={server}
+                  onOpen={() => onOpenUrl(server.requestedUrl)}
+                />
+              ))}
             </div>
-            <DiscoveryList>
+          </section>
+        ) : null}
+        {recents.length > 0 ? (
+          <section className="space-y-2" aria-label="Recently used">
+            <h2 className="px-2 text-xs font-medium text-muted-foreground">Recently used</h2>
+            <div className="flex flex-col">
               {recents.map((entry) => (
                 <PreviewRecentUrlCard
                   key={entry.url}
@@ -66,29 +77,8 @@ export function PreviewEmptyState({
                   onRemove={() => onRemoveRecent(entry.url)}
                 />
               ))}
-            </DiscoveryList>
-          </div>
-        ) : null}
-        {servers.length > 0 ? (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <RadioTower className="size-4 shrink-0" />
-              <h2 className="font-medium">Local servers</h2>
             </div>
-            <DiscoveryList>
-              {servers.map((server) => (
-                <PreviewLocalServerCard
-                  key={`${server.host}:${server.port}`}
-                  threadRef={threadRef}
-                  server={server}
-                  onOpen={() => onOpenUrl(server.requestedUrl)}
-                />
-              ))}
-            </DiscoveryList>
-            <p className="px-1 text-xs text-muted-foreground">
-              Select a live local server to open it in this browser tab.
-            </p>
-          </div>
+          </section>
         ) : null}
       </div>
     </div>

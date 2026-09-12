@@ -13,6 +13,7 @@ import {
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { MonitorUp } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -58,6 +59,8 @@ import { PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { Badge } from "~/components/ui/badge";
+import { Button } from "~/components/ui/button";
+import { cn } from "~/lib/utils";
 import { getPreviewAutomationClientId } from "./previewAutomationClientId";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
@@ -107,6 +110,8 @@ export function PreviewView({
 }: Props) {
   const [focusUrlNonce, setFocusUrlNonce] = useState<number | undefined>(undefined);
   const [pickActive, setPickActive] = useState(false);
+  const [reopening, setReopening] = useState(false);
+  const reopeningRef = useRef(false);
   const activeRecordingTabIds = useActiveBrowserRecordingTabIds();
   const pickActiveRef = useRef(false);
   const isMountedRef = useRef(true);
@@ -152,6 +157,7 @@ export function PreviewView({
         : findActiveBrowserRecordingRuntimeTabId(threadRef, tabId)
       : null;
   const snapshot = tabId ? (previewState.sessions[tabId] ?? null) : null;
+  const pictureInPicture = Boolean(tabId && miniPlayerTabId === tabId);
   const hostedElsewhere = Boolean(
     snapshot?.hostingClientId && snapshot.hostingClientId !== getPreviewAutomationClientId(),
   );
@@ -164,6 +170,9 @@ export function PreviewView({
   const refreshDisabled = navStatus._tag === "Idle";
   const isUnreachable = navStatus._tag === "LoadFailed";
   const showEmptyState = shouldShowPreviewEmptyState(snapshot);
+  const pageAvailable = Boolean(
+    desktopOverlay?.hasWebContents && !showEmptyState && !isUnreachable,
+  );
   const controller = desktopOverlay?.controller ?? "none";
   const viewport = snapshot?.viewport ?? FILL_PREVIEW_VIEWPORT;
   const browserDefaults = useBrowserDefaults();
@@ -215,21 +224,44 @@ export function PreviewView({
   );
 
   const reopenHere = async () => {
-    if (!snapshot || !tabId) return;
-    const closed = await close({
-      environmentId: threadRef.environmentId,
-      input: { threadId: threadRef.threadId, tabId },
-    });
-    if (closed._tag === "Failure") return;
-    const result = await openPreviewSession({
-      openPreview: open,
-      threadRef,
-      ...(snapshot.navStatus._tag === "Idle" ? {} : { url: snapshot.navStatus.url }),
-      viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
-      ...(snapshot.profileId ? { profileId: snapshot.profileId } : {}),
-    });
-    if (result._tag === "Success")
+    if (!snapshot || !tabId || reopeningRef.current) return;
+    reopeningRef.current = true;
+    setReopening(true);
+    try {
+      // Keep the original tab available until its replacement opens successfully.
+      const result = await openPreviewSession({
+        openPreview: open,
+        threadRef,
+        ...(snapshot.navStatus._tag === "Idle" ? {} : { url: snapshot.navStatus.url }),
+        viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
+        profileId: activeProfileId,
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not reopen this page",
+            description: "The original tab is still open on the other desktop. Try again.",
+          });
+        }
+        return;
+      }
       useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
+      const closed = await close({
+        environmentId: threadRef.environmentId,
+        input: { threadId: threadRef.threadId, tabId },
+      });
+      if (closed._tag === "Failure" && !isAtomCommandInterrupted(closed)) {
+        toastManager.add({
+          type: "error",
+          title: "The other tab could not be closed",
+          description: "This page is open here. You can close the original on the other desktop.",
+        });
+      }
+    } finally {
+      reopeningRef.current = false;
+      if (isMountedRef.current) setReopening(false);
+    }
   };
 
   const handleSubmitUrl = useCallback(
@@ -733,7 +765,7 @@ export function PreviewView({
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-thread-key={scopedThreadKey(threadRef)}
     >
-      <div inert={hostedElsewhere} className="shrink-0">
+      <div inert={hostedElsewhere} className={cn("shrink-0", hostedElsewhere && "opacity-40")}>
         <PreviewChromeRow
           url={url}
           loading={loading}
@@ -745,21 +777,15 @@ export function PreviewView({
           onForward={handleForward}
           onRefresh={handleRefresh}
           onSubmit={(next) => void handleSubmitUrl(next)}
-          onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
           onCapture={previewBridge && tabId ? handleCapture : undefined}
-          captureDisabled={!desktopOverlay || isUnreachable}
+          captureDisabled={!pageAvailable && recordingRuntimeTabId === null}
           recording={recordingRuntimeTabId !== null}
-          onPictureInPicture={previewBridge && tabId ? handlePictureInPicture : undefined}
-          pictureInPicture={miniPlayerTabId === tabId}
-          pictureInPictureDisabled={!desktopOverlay?.hasWebContents || isUnreachable}
+          controller={pageAvailable ? controller : "none"}
           onPickElement={previewBridge && tabId ? handlePickElement : undefined}
           pickActive={pickActive}
-          // Disable when there's no tab (nothing to pick on) OR the page
-          // failed to load (a React overlay covers the webview, so the
-          // user wouldn't be able to actually click anything underneath).
-          pickDisabled={!tabId || isUnreachable}
+          pickDisabled={!pageAvailable && !pickActive}
           pickDisabledReason={
-            isUnreachable ? "Page didn't load — pick unavailable until the page renders" : undefined
+            isUnreachable ? "Load the page to annotate it" : "Open a page to annotate it"
           }
           leadingActions={
             // Only when it differs from the default: labelling every tab
@@ -793,6 +819,11 @@ export function PreviewView({
                 colorScheme={desktopOverlay?.colorScheme ?? "system"}
                 deviceToolbarVisible={viewport._tag !== "fill"}
                 onToggleDeviceToolbar={handleToggleDeviceToolbar}
+                onOpenInBrowser={handleOpenInBrowser}
+                openInBrowserDisabled={!url}
+                pictureInPicture={pictureInPicture}
+                onPictureInPicture={handlePictureInPicture}
+                pictureInPictureDisabled={!pageAvailable && !pictureInPicture}
                 nativePictureInPicture={desktopOverlay?.pictureInPicture ?? false}
                 onNativePictureInPicture={handleNativePictureInPicture}
               />
@@ -803,17 +834,29 @@ export function PreviewView({
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
         {hostedElsewhere ? (
-          <div className="p-6 text-center text-sm text-muted-foreground">
-            <p role="status">
-              This preview is hosted by another desktop. Its agent controls and evidence are shared
-              through this environment.
-            </p>
-            <button className="mt-3 underline" onClick={() => void reopenHere()}>
-              Close that tab and reopen here
-            </button>
+          <div className="h-full overflow-y-auto px-6 py-12">
+            <div className="mx-auto flex max-w-sm flex-col items-start gap-4">
+              <MonitorUp className="size-6 text-muted-foreground" aria-hidden />
+              <div className="space-y-2" role="status">
+                <h2 className="text-base font-medium text-foreground">Open on another desktop</h2>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  Reopen this address here to continue. The other tab will close; page state won’t
+                  transfer.
+                </p>
+              </div>
+              {url ? <p className="w-full break-all text-xs text-muted-foreground">{url}</p> : null}
+              <Button
+                type="button"
+                size="sm"
+                disabled={reopening}
+                onClick={() => void reopenHere()}
+              >
+                {reopening ? "Reopening…" : "Reopen here"}
+              </Button>
+            </div>
           </div>
         ) : null}
-        {runtimeTabId && snapshot && !showEmptyState ? (
+        {!hostedElsewhere && runtimeTabId && snapshot && !showEmptyState ? (
           <BrowserSurfaceSlot
             key={runtimeTabId}
             tabId={runtimeTabId}
@@ -821,7 +864,7 @@ export function PreviewView({
             className="absolute inset-0 h-full w-full"
           />
         ) : null}
-        {showEmptyState ? (
+        {!hostedElsewhere && showEmptyState ? (
           <PreviewEmptyState
             threadRef={threadRef}
             environmentId={threadRef.environmentId}
@@ -831,22 +874,17 @@ export function PreviewView({
             onOpenUrl={(next) => void handleOpenServerUrl(next)}
           />
         ) : null}
-        {snapshot && desktopOverlay ? (
+        {!hostedElsewhere && snapshot && desktopOverlay ? (
           <ZoomIndicator zoomFactor={desktopOverlay.zoomFactor} />
         ) : null}
-        {runtimeTabId && desktopOverlay && !showEmptyState && !isUnreachable ? (
+        {!hostedElsewhere && runtimeTabId && desktopOverlay && !showEmptyState && !isUnreachable ? (
           <AgentBrowserCursor
             tabId={runtimeTabId}
             zoomFactor={desktopOverlay.zoomFactor}
             controller={controller}
           />
         ) : null}
-        {controller !== "none" ? (
-          <div className="pointer-events-none absolute left-3 top-3 z-40 rounded-full border border-border/70 bg-background/90 px-2.5 py-1 text-[11px] font-medium shadow-sm backdrop-blur">
-            {controller === "agent" ? "Agent controlling browser" : "Human control"}
-          </div>
-        ) : null}
-        {navStatus._tag === "LoadFailed" ? (
+        {!hostedElsewhere && navStatus._tag === "LoadFailed" ? (
           <div className="absolute inset-0 z-10 bg-background">
             <PreviewUnreachable
               url={navStatus.url}
