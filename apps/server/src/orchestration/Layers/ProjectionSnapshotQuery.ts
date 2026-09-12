@@ -1441,41 +1441,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ),
     );
 
-  const getLatestThreadActivityRow = SqlSchema.findOneOption({
-    Request: Schema.Struct({ threadId: ThreadId, kind: Schema.String }),
-    Result: ProjectionThreadActivityDbRowSchema,
-    execute: ({ threadId, kind }) => sql`
-      SELECT
-        activity_id AS "activityId",
-        thread_id AS "threadId",
-        turn_id AS "turnId",
-        tone,
-        kind,
-        summary,
-        payload_json AS "payload",
-        sequence,
-        created_at AS "createdAt"
-      FROM projection_thread_activities
-      WHERE thread_id = ${threadId}
-        AND kind = ${kind}
-      ORDER BY sequence DESC, created_at DESC, activity_id DESC
-      LIMIT 1
-    `,
-  });
-
-  const getLatestThreadActivity: ProjectionSnapshotQueryShape["getLatestThreadActivity"] = (
-    input,
-  ) =>
-    getLatestThreadActivityRow(input).pipe(
-      Effect.map(Option.map(mapThreadActivityRow)),
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "ProjectionSnapshotQuery.getLatestThreadActivity:query",
-          "ProjectionSnapshotQuery.getLatestThreadActivity:decodeRow",
-        ),
-      ),
-    );
-
   const listThreadActivityIdsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityIdRowSchema,
@@ -3711,7 +3676,6 @@ pending_approval_requests AS (
   return {
     getCommandReadModel,
     getUserInputActivity,
-    getLatestThreadActivity,
     getSnapshot,
     getShellSnapshot,
     getArchivedShellSnapshot,

@@ -1214,8 +1214,6 @@ export const MessageOrigin = Schema.Union([
 export type MessageOrigin = typeof MessageOrigin.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
-  /** An automatic follow-up must not steer newer work. Internal commands only. */
-  expectedCompletedTurnId: Schema.optional(TurnId),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1260,7 +1258,6 @@ const ClientThreadTurnStartCommand = Schema.Struct({
 });
 
 const ThreadTurnInterruptCommand = Schema.Struct({
-  expectedUserMessageAt: Schema.optional(IsoDateTime),
   type: Schema.Literal("thread.turn.interrupt"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1769,7 +1766,6 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
-  expectedUserMessageAt: Schema.optional(IsoDateTime),
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,

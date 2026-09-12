@@ -11,7 +11,6 @@ import type {
   DesktopPreviewAnnotationTheme,
   DesktopPreviewAutomationStatus,
   DesktopPreviewAutomationRequest,
-  DesktopPreviewPortGatewayInput,
   PreviewBrowserCdpInput,
   PreviewBrowserCdpEvent,
   DesktopPreviewColorScheme,
@@ -36,7 +35,6 @@ import type {
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
-import { makePreviewPortGateways } from "./PortGateway.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import {
@@ -627,11 +625,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   artifactDirectory: string,
   pictureInPicturePreloadPath: string,
 ) {
-  const gatewayClock = yield* Clock.clockWith(Effect.succeed);
-  const portGateways = yield* Effect.acquireRelease(
-    Effect.sync(() => makePreviewPortGateways(() => gatewayClock.currentTimeMillisUnsafe())),
-    (gateways) => Effect.promise(() => gateways.close()),
-  );
   const fileSystem = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcessPlatform;
   const path = yield* Path.Path;
@@ -2145,7 +2138,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   const closeTabUnlocked = Effect.fn("PreviewManager.closeTabUnlocked")(function* (tabId: string) {
     if (!(yield* SynchronizedRef.get(tabsRef)).has(tabId)) return;
-    yield* Effect.promise(() => portGateways.release(tabId));
     clearPendingRecording(tabId);
     yield* Effect.all(
       [
@@ -4869,19 +4861,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   yield* Effect.addFinalizer(() => destroy().pipe(Effect.ignore));
 
-  const createPortGateway = (input: DesktopPreviewPortGatewayInput) =>
-    withTabLifecycleLock(
-      input.tabId,
-      Effect.gen(function* () {
-        if (!(yield* SynchronizedRef.get(tabsRef)).has(input.tabId))
-          return yield* new PreviewTabNotFoundError({ tabId: input.tabId });
-        return yield* attemptPromise({ operation: "createPortGateway", tabId: input.tabId }, () =>
-          portGateways.open(input),
-        );
-      }),
-    );
   return {
-    createPortGateway,
     automationRun,
     automationCancel,
     automationClick,
@@ -5238,9 +5218,6 @@ export class PreviewManager extends Context.Service<
       tabId: string,
       webContentsId: number,
     ) => Effect.Effect<void, PreviewManagerError>;
-    readonly createPortGateway: (
-      input: DesktopPreviewPortGatewayInput,
-    ) => Effect.Effect<string, PreviewManagerError>;
     readonly navigate: (tabId: string, url: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goBack: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goForward: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
@@ -5364,7 +5341,6 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,
-    createPortGateway: operations.createPortGateway,
     navigate: operations.navigate,
     goBack: operations.goBack,
     goForward: operations.goForward,

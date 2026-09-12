@@ -1012,7 +1012,7 @@ export type PreviewAutomationResolveUrlInput = typeof PreviewAutomationResolveUr
 export const PreviewUrlResolution = Schema.Struct({
   requestedUrl: Schema.String,
   resolvedUrl: Schema.String,
-  resolutionKind: Schema.Literals(["direct", "direct-private-network", "authenticated-gateway"]),
+  resolutionKind: Schema.Literals(["direct", "direct-private-network"]),
   environmentId: EnvironmentId,
 });
 export type PreviewUrlResolution = typeof PreviewUrlResolution.Type;

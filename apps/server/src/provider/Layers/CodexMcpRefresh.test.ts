@@ -29,12 +29,36 @@ it.effect("reloads only changed registrations or explicit refresh and retries fa
     expect(reloads).toBe(2);
     config = { mcp_servers: { preview: { url: "http://host/two", bearer_token: "third" } } };
     fail = true;
-    yield* refresh().pipe(Effect.flip);
+    expect(yield* refresh()).toBe(false);
     expect(reloads).toBe(3);
     fail = false;
-    yield* refresh();
+    expect(yield* refresh()).toBe(true);
     yield* refresh();
     expect(reloads).toBe(4);
+  }),
+);
+
+it.effect("survives unavailable configuration and retries without preventing native work", () =>
+  Effect.gen(function* () {
+    let unavailable = true;
+    let reloads = 0;
+    const refresh = yield* makeCodexMcpRefresh({
+      configuration: Effect.suspend(() =>
+        unavailable
+          ? Effect.fail(CodexErrors.CodexAppServerRequestError.invalidParams("Unavailable"))
+          : Effect.succeed({ mcp_servers: {} }),
+      ),
+      reload: Effect.sync(() => {
+        reloads++;
+      }),
+    });
+    expect(yield* refresh()).toBe(false);
+    expect(reloads).toBe(0);
+    unavailable = false;
+    expect(yield* refresh()).toBe(true);
+    expect(reloads).toBe(1);
+    expect(yield* refresh()).toBe(true);
+    expect(reloads).toBe(1);
   }),
 );
 

@@ -16,7 +16,6 @@ import {
   useFaviconProjectRefForThread,
 } from "~/browserFaviconStore";
 import { useBrowserPointerStore } from "~/browser/browserPointerStore";
-import { describePreviewUrl } from "~/browser/previewPortGateway";
 import { applyPreviewDesktopState, type DesktopPreviewOverlay } from "~/previewStateStore";
 import { previewEnvironment } from "~/state/preview";
 import { usePreparedConnection } from "~/state/session";
@@ -85,18 +84,7 @@ export function usePreviewBridge(input: {
       lastReportedKind.current = reported.lastReportedKind;
       void reportStatus({
         environmentId: stableThreadRef.environmentId,
-        input:
-          reported.input.navStatus._tag === "Idle"
-            ? reported.input
-            : {
-                ...reported.input,
-                environmentPort: describePreviewUrl(runtimeTabId, reported.input.navStatus.url)
-                  .environmentPort,
-                navStatus: {
-                  ...reported.input.navStatus,
-                  url: describePreviewUrl(runtimeTabId, reported.input.navStatus.url).url,
-                },
-              },
+        input: reported.input,
       });
     },
   );

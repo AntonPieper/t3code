@@ -253,7 +253,6 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       const snapshot = {
         ...initialSnapshot,
         hostingClientId: input.hostingClientId ?? null,
-        environmentPort: input.environmentPort ?? null,
       };
       yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
         Effect.gen(function* () {
@@ -359,10 +358,6 @@ export const make = Effect.gen(function* PreviewManagerMake() {
           threadId: session.threadId,
           tabId: session.tabId,
           hostingClientId: session.snapshot.hostingClientId,
-          environmentPort:
-            input.environmentPort === undefined
-              ? session.snapshot.environmentPort
-              : input.environmentPort,
           navStatus: input.navStatus,
           canGoBack: input.canGoBack,
           canGoForward: input.canGoForward,

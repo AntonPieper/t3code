@@ -47,7 +47,6 @@ import {
   type CodexBrowserEngine,
   type T3CodeToolAvailability,
 } from "../CodexDeveloperInstructions.ts";
-const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -1335,9 +1334,7 @@ export const makeCodexSessionRuntime = (
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
     const nativeApplicationContextRef = yield* Ref.make(false);
-    let refreshMcp:
-      | ((force?: boolean) => Effect.Effect<void, CodexErrors.CodexAppServerError>)
-      | undefined;
+    let refreshMcp: ((force?: boolean) => Effect.Effect<boolean>) | undefined;
     let mcpRefreshRevision = readMcpProviderSession(options.threadId)?.refreshRevision ?? 0;
     const failedMcpServers = new Set<string>();
     const observedNativeTools = new Set<string>();
@@ -2456,14 +2453,7 @@ export const makeCodexSessionRuntime = (
           .request("config/read", { cwd: options.cwd, includeLayers: false })
           .pipe(Effect.map(({ config }) => config)),
         reload: client.request("config/mcpServer/reload", undefined),
-      }).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning(
-            "Codex configuration observation unavailable; explicit refresh remains available.",
-            { message: cause.message },
-          ).pipe(Effect.as(undefined)),
-        ),
-      );
+      });
 
       const requestedModel = normalizeCodexModelSlug(options.model);
 
@@ -2544,13 +2534,12 @@ export const makeCodexSessionRuntime = (
                 .request("config/read", { cwd: options.cwd, includeLayers: false })
                 .pipe(Effect.map(({ config }) => config)),
               reload: client.request("config/mcpServer/reload", undefined),
-            }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-            // Recover after an unavailable initial config read before using the catalog.
-            if (refreshMcp) yield* refreshMcp(true);
-            else if (explicitRefresh) yield* client.request("config/mcpServer/reload", undefined);
-          } else yield* refreshMcp(explicitRefresh);
-          mcpRefreshRevision = revision;
-          refreshedCredentialRevision = credentialRevision;
+            });
+          }
+          if (yield* refreshMcp(explicitRefresh)) {
+            mcpRefreshRevision = revision;
+            refreshedCredentialRevision = credentialRevision;
+          }
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );

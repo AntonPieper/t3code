@@ -206,6 +206,10 @@ describe("native application context", () => {
             NodeAssert.equal(request.collaborationMode?.settings.developer_instructions, null);
             NodeAssert.deepEqual(encodeTurnStart(request), request);
             NodeAssert.equal(request.additionalContext?.["t3.application"]?.kind, "application");
+            const guidance = request.additionalContext!["t3.application"]!.value;
+            NodeAssert.match(guidance, /link_pull_request/);
+            NodeAssert.match(guidance, /list_thread_pull_requests/);
+            NodeAssert.equal(guidance.match(/<pull_request_linking>/g)?.length, 1);
           }
           NodeAssert.match(
             requests[2]!.additionalContext!["t3.application"]!.value,

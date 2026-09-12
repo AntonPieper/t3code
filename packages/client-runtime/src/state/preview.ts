@@ -34,45 +34,6 @@ export function createPreviewEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
-    verification: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
-      label: "environment-data:preview:verification",
-      tag: WS_METHODS.previewVerificationEvents,
-    }),
-    setVerification: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:set-verification",
-      tag: WS_METHODS.previewVerificationSet,
-    }),
-    cancelVerification: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:cancel-verification",
-      tag: WS_METHODS.previewVerificationCancel,
-    }),
-    createPortGateway: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:create-port-gateway",
-      tag: WS_METHODS.previewCreatePortGateway,
-    }),
-    servers: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
-      label: "environment-data:preview:servers",
-      tag: WS_METHODS.previewServerEvents,
-      idleTtlMs: 0,
-    }),
-    startServer: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:start-server",
-      tag: WS_METHODS.previewStartServer,
-      scheduler: lifecycleScheduler,
-      concurrency: lifecycleConcurrency,
-    }),
-    stopServer: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:stop-server",
-      tag: WS_METHODS.previewStopServer,
-      scheduler: lifecycleScheduler,
-      concurrency: lifecycleConcurrency,
-    }),
-    restartServer: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:preview:restart-server",
-      tag: WS_METHODS.previewRestartServer,
-      scheduler: lifecycleScheduler,
-      concurrency: lifecycleConcurrency,
-    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",
       tag: WS_METHODS.previewList,

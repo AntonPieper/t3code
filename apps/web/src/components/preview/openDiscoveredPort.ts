@@ -4,7 +4,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 
-import { discoveredServerTarget } from "~/browser/browserTargetResolver";
+import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import type { BrowserSettingsReadError, OpenPreviewMutation } from "~/browser/openFileInPreview";
 import { recordVisitForThread } from "~/browserHistoryStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -15,14 +15,11 @@ export async function openDiscoveredPort<E>(input: {
   readonly port: DiscoveredLocalServer;
   readonly openPreview: OpenPreviewMutation<E>;
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
-  const target = discoveredServerTarget(input.port.url);
+  const resolvedUrl = resolveDiscoveredServerUrl(input.threadRef.environmentId, input.port.url);
   const result = await openPreviewSession({
     openPreview: input.openPreview,
     threadRef: input.threadRef,
-    url: input.port.url,
-    ...(target.kind === "environment-port"
-      ? { environmentPort: { port: target.port, protocol: target.protocol ?? "http" } }
-      : {}),
+    url: resolvedUrl,
   });
   return mapAtomCommandResult(result, (snapshot) => {
     recordVisitForThread(input.threadRef, input.port.url);

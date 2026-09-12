@@ -42,7 +42,6 @@ import {
   usePreviewMiniPlayerStore,
 } from "~/previewMiniPlayerStore";
 import { resolveBrowserNavigationTarget } from "~/browser/browserTargetResolver";
-import { resolvePreviewNavigation } from "~/browser/previewPortGateway";
 import {
   readActiveBrowserRecordingTargets,
   startBrowserRecording,
@@ -331,9 +330,8 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
       environmentId,
       supportedOperations: PREVIEW_AUTOMATION_OPERATIONS.filter(
         (operation) =>
-          (operation !== "browserCdp" ||
-            Boolean(previewBridge?.automation.run && previewBridge?.automation.cancel)) &&
-          (operation !== "resolveUrl" || Boolean(previewBridge?.createPortGateway)),
+          operation !== "browserCdp" ||
+          Boolean(previewBridge?.automation.run && previewBridge?.automation.cancel),
       ),
       supportsCancellation: Boolean(
         previewBridge?.automation.run && previewBridge?.automation.cancel,
@@ -635,22 +633,17 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
             return await currentStatus(threadRef, activeTabId);
           }
           case "resolveUrl": {
-            const ready = await requireReadyTab();
+            await requireReadyTab();
             const input = decodeResolveUrlInput(request.input);
-            const resolution = await resolvePreviewNavigation(
-              environmentId,
-              ready.runtimeTabId,
-              input.target,
-            );
+            const resolution = resolveBrowserNavigationTarget(environmentId, input.target);
             signal.throwIfAborted();
             return resolution;
           }
           case "navigate": {
             const ready = await requireReadyTab();
             const input = request.input as PreviewAutomationNavigateInput;
-            const resolution = await resolvePreviewNavigation(
+            const resolution = resolveBrowserNavigationTarget(
               environmentId,
-              ready.runtimeTabId,
               input.target ?? {
                 kind: "url",
                 url: input.url!,

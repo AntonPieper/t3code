@@ -61,7 +61,6 @@ import {
   stagePendingTerminalLaunch,
 } from "../terminal/terminalLaunchContext";
 import { terminalDebugLog } from "../terminal/terminalDebugLog";
-import { PreviewServersPanel } from "./PreviewServersPanel";
 import { ThreadDetailScreen, type ThreadDetailScreenProps } from "./ThreadDetailScreen";
 import {
   ThreadGitControls,
@@ -840,13 +839,6 @@ function ThreadRouteContent(
   const renderThreadRouteBody = (showActionControls: boolean) => (
     <>
       <ThreadGitControls {...threadGitControlProps} showActionControls={showActionControls} />
-      <PreviewServersPanel
-        threadRef={{
-          environmentId: EnvironmentId.make(threadGitControlProps.environmentId),
-          threadId: ThreadId.make(threadGitControlProps.threadId),
-        }}
-        scripts={threadGitControlProps.projectScripts}
-      />
 
       <GitActionProgressOverlay progress={gitActionProgress} onDismiss={dismissGitActionResult} />
 

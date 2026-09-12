@@ -18,12 +18,16 @@ import {
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as PreviewManager from "../preview/Manager.ts";
 
-const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
+const makeBroker = PreviewAutomationBroker.make.pipe(
+  Effect.provide(Layer.mergeAll(PreviewManager.layer, NodeServices.layer)),
+);
 
 it.effect("forwards interrupted request cancellation to a capable physical host", () =>
   Effect.scoped(
@@ -83,6 +87,47 @@ const requestsFrom = (
       return Result.succeed({ ...event.request, connectionId: event.connectionId });
     }),
   );
+
+it.effect(
+  "routes to the shared Preview manager's owner even when another host connected first",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const preview = yield* PreviewManager.PreviewManager;
+        const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+        const tab = yield* preview.open({
+          threadId: scope.threadId,
+          url: "http://localhost:5173",
+          hostingClientId: "owner",
+        });
+        for (const clientId of ["other", "owner"]) {
+          const connected = yield* Deferred.make<void>();
+          const events = yield* broker.connect(makeHost({ clientId }));
+          yield* Stream.runForEach(events, (event) => {
+            if (event.type === "connected") return Deferred.succeed(connected, undefined);
+            if (event.type !== "request") return Effect.void;
+            return broker.respond({
+              clientId,
+              connectionId: event.connectionId,
+              requestId: event.request.requestId,
+              ok: true,
+              result: { clientId },
+            });
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(connected);
+        }
+        expect(
+          yield* broker.invoke({ scope, operation: "status", input: {}, tabId: tab.tabId }),
+        ).toEqual({ clientId: "owner" });
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(PreviewAutomationBroker.layer, PreviewManager.layer).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
+);
 
 it.effect("atomically registers a connected host and correlates its response", () =>
   Effect.scoped(

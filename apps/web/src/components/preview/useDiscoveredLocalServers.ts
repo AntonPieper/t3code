@@ -3,6 +3,7 @@ import { isLoopbackHost } from "@t3tools/shared/preview";
 import { useMemo } from "react";
 
 import type { EnvironmentId } from "@t3tools/contracts";
+import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useDiscoveredPortsState } from "~/portDiscoveryState";
 
 export interface PreviewableServer extends DiscoveredLocalServer {
@@ -33,7 +34,7 @@ export function useDiscoveredLocalServers(
       mergeServers({
         scanner: scannerState.servers.map((server) => ({
           ...server,
-          url: server.url,
+          url: resolveDiscoveredServerUrl(input.environmentId, server.url),
           requestedUrl: server.url,
         })),
         configuredUrls: input.configuredUrls ?? [],

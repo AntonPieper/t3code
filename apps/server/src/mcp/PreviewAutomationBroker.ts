@@ -39,7 +39,7 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
-import { PreviewManager } from "../preview/Manager.ts";
+import { PreviewManager, layer as PreviewManagerLive } from "../preview/Manager.ts";
 
 export interface PreviewAutomationInvokeInput {
   readonly scope: McpInvocationContext.McpInvocationScope;
@@ -66,7 +66,6 @@ export class PreviewAutomationBroker extends Context.Service<
     readonly invoke: <A = unknown>(
       request: PreviewAutomationInvokeInput,
     ) => Effect.Effect<A, PreviewAutomationError>;
-    readonly hasHost: Effect.Effect<boolean>;
     readonly cancelThread: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/mcp/PreviewAutomationBroker") {}
@@ -322,7 +321,7 @@ const classifyResponseError = (
 };
 
 export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
-  const preview = yield* Effect.serviceOption(PreviewManager);
+  const preview = yield* PreviewManager;
   const crypto = yield* Crypto.Crypto;
   const state = yield* SynchronizedRef.make<BrokerState>({
     clients: new Map(),
@@ -469,12 +468,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       hostAssignmentKey(input.scope),
     );
     const logicalTabId = input.tabId ?? previousAssignment?.tabId;
-    const hostingClientId =
-      logicalTabId && Option.isSome(preview)
-        ? (yield* preview.value.list({ threadId: input.scope.threadId })).sessions.find(
-            (tab) => tab.tabId === logicalTabId,
-          )?.hostingClientId
-        : undefined;
+    const hostingClientId = logicalTabId
+      ? (yield* preview.list({ threadId: input.scope.threadId })).sessions.find(
+          (tab) => tab.tabId === logicalTabId,
+        )?.hostingClientId
+      : undefined;
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
     const route = yield* SynchronizedRef.modify(state, (current) => {
       const assignments = new Map(
@@ -671,8 +669,9 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     respond,
     invoke,
     cancelThread,
-    hasHost: SynchronizedRef.get(state).pipe(Effect.map((current) => current.clients.size > 0)),
   });
 }).pipe(Effect.withSpan("PreviewAutomationBroker.make"));
 
-export const layer = Layer.effect(PreviewAutomationBroker, make);
+export const layer = Layer.effect(PreviewAutomationBroker, make).pipe(
+  Layer.provide(PreviewManagerLive),
+);

@@ -6,7 +6,7 @@ import {
   type PreviewSessionSnapshot,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { isElectron } from "~/env";
 import { getPreviewAutomationClientId } from "~/components/preview/previewAutomationClientId";
@@ -20,8 +20,6 @@ import { readPreviewAnnotationTheme } from "./annotationTheme";
 import { useBrowserPointerStore } from "./browserPointerStore";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
-import { acquireDesktopTab } from "./desktopTabLifetime";
-import { previewPhysicalUrl, resolvePreviewNavigation } from "./previewPortGateway";
 
 export function ElectronBrowserHost() {
   const { resolvedTheme } = useTheme();
@@ -136,66 +134,5 @@ function OwnedBrowserWebview(
     };
   }, [claim, clientId, environmentId, threadId, tabId, hostingClientId]);
   if (hostingClientId !== undefined && hostingClientId !== clientId) return null;
-  return <PreparedBrowserWebview {...props} />;
-}
-
-function PreparedBrowserWebview(
-  props: React.ComponentProps<typeof HostedBrowserWebview> & {
-    readonly snapshot: PreviewSessionSnapshot;
-  },
-) {
-  // The key is the runtime tab lifetime. Later navigation updates must not remount its guest.
-  const [initial] = useState(() => props);
-  const [prepared, setPrepared] = useState(() => !initial.snapshot.environmentPort);
-  const report = useAtomCommand(previewEnvironment.reportStatus, { reportFailure: false });
-  useEffect(() => {
-    if (!initial.snapshot.environmentPort || !initial.initialUrl) return;
-    let disposed = false;
-    const lease = acquireDesktopTab(initial.runtimeTabId);
-    void lease.ready
-      .then(async () => {
-        if (disposed) return;
-        const url = new URL(initial.initialUrl!);
-        await resolvePreviewNavigation(initial.threadRef.environmentId, initial.runtimeTabId, {
-          kind: "environment-port",
-          ...initial.snapshot.environmentPort!,
-          path: `${url.pathname}${url.search}${url.hash}`,
-        });
-        if (!disposed) setPrepared(true);
-      })
-      .catch((cause: unknown) => {
-        if (disposed) return;
-        void report({
-          environmentId: initial.threadRef.environmentId,
-          input: {
-            threadId: initial.threadRef.threadId,
-            tabId: initial.tabId,
-            navStatus: {
-              _tag: "LoadFailed",
-              url: initial.initialUrl!,
-              title: "",
-              code: -2,
-              description:
-                cause instanceof Error ? cause.message : "Preview routing is unavailable.",
-            },
-            environmentPort: initial.snapshot.environmentPort,
-            canGoBack: false,
-            canGoForward: false,
-          },
-        });
-      });
-    return () => {
-      disposed = true;
-      lease.release();
-    };
-  }, [initial, report]);
-  if (!prepared) return null;
-  return (
-    <HostedBrowserWebview
-      {...props}
-      initialUrl={
-        props.initialUrl === null ? null : previewPhysicalUrl(props.runtimeTabId, props.initialUrl)
-      }
-    />
-  );
+  return <HostedBrowserWebview {...props} />;
 }

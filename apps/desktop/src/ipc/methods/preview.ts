@@ -1,6 +1,5 @@
 import {
   DesktopPreviewAnnotationThemeInputSchema,
-  DesktopPreviewPortGatewayInputSchema,
   DesktopPreviewArtifactInputSchema,
   DesktopPreviewAutomationClickInputSchema,
   DesktopPreviewAutomationRequestSchema,
@@ -492,17 +491,7 @@ export const saveRecording = DesktopIpc.makeIpcMethod({
   }),
 });
 
-export const createPortGateway = DesktopIpc.makeIpcMethod({
-  channel: IpcChannels.PREVIEW_PORT_GATEWAY_CHANNEL,
-  payload: DesktopPreviewPortGatewayInputSchema,
-  result: Schema.String,
-  handler: Effect.fn("desktop.ipc.preview.createPortGateway")(function* (input) {
-    return yield* (yield* PreviewManager.PreviewManager).createPortGateway(input);
-  }),
-});
-
 export const methods = [
-  createPortGateway,
   automationRun,
   automationCancel,
   createTab,

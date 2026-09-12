@@ -20,14 +20,21 @@ export const makeCodexMcpRefresh = Effect.fn("makeCodexMcpRefresh")(function* <E
       }),
     ),
   );
-  let previous = yield* read;
+  const failed = Effect.logWarning(
+    "Codex MCP configuration refresh failed; continuing with the current tools and retrying next turn.",
+  );
+  let previous = yield* read.pipe(Effect.catch(() => failed.pipe(Effect.as(undefined))));
   const semaphore = yield* Semaphore.make(1);
-  const refresh = Effect.fn("CodexSessionRuntime.refreshMcp")(function* (force: boolean) {
-    const current = yield* read;
-    if (!force && current === previous) return;
-    // Commit the fingerprint only after native refresh succeeds, so failure is retryable.
-    yield* input.reload;
-    previous = current;
-  });
+  const refresh = Effect.fn("CodexSessionRuntime.refreshMcp")(
+    function* (force: boolean) {
+      const current = yield* read;
+      if (!force && current === previous) return true;
+      // Commit the fingerprint only after native refresh succeeds, so failure is retryable.
+      yield* input.reload;
+      previous = current;
+      return true;
+    },
+    Effect.catch(() => failed.pipe(Effect.as(false))),
+  );
   return (force = false) => semaphore.withPermit(refresh(force));
 });

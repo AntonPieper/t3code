@@ -1590,13 +1590,6 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    if (
-      (event.payload.turnId !== undefined &&
-        thread.session?.activeTurnId !== event.payload.turnId) ||
-      (event.payload.expectedUserMessageAt !== undefined &&
-        thread.latestUserMessageAt !== event.payload.expectedUserMessageAt)
-    )
-      return;
     const session = thread.session;
     if (!session || session.status === "stopped") {
       return yield* appendProviderFailureActivity({

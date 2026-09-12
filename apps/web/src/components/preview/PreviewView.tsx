@@ -30,8 +30,7 @@ import {
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
-import { discoveredServerTarget } from "~/browser/browserTargetResolver";
-import { resolvePreviewNavigation } from "~/browser/previewPortGateway";
+import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -195,11 +194,7 @@ export function PreviewView({
     async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
         // The bridge mirrors the resolved URL back to the server.
-        const resolution = await resolvePreviewNavigation(threadRef.environmentId, runtimeTabId, {
-          kind: "url",
-          url: resolvedUrl,
-        });
-        await previewBridge.navigate(runtimeTabId, resolution.resolvedUrl);
+        await previewBridge.navigate(runtimeTabId, resolvedUrl);
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;
       }
@@ -230,7 +225,6 @@ export function PreviewView({
       openPreview: open,
       threadRef,
       ...(snapshot.navStatus._tag === "Idle" ? {} : { url: snapshot.navStatus.url }),
-      ...(snapshot.environmentPort ? { environmentPort: snapshot.environmentPort } : {}),
       viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
       ...(snapshot.profileId ? { profileId: snapshot.profileId } : {}),
     });
@@ -255,35 +249,15 @@ export function PreviewView({
   const handleOpenServerUrl = useCallback(
     async (next: string) => {
       try {
-        const target = discoveredServerTarget(next);
-        if (runtimeTabId) {
-          const resolution = await resolvePreviewNavigation(
-            threadRef.environmentId,
-            runtimeTabId,
-            target,
-          );
-          await navigateToResolvedUrl(resolution.resolvedUrl);
-        } else {
-          const result = await openPreviewSession({
-            openPreview: open,
-            threadRef,
-            url: next,
-            ...(target.kind === "environment-port"
-              ? { environmentPort: { port: target.port, protocol: target.protocol ?? "http" } }
-              : {}),
-          });
-          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+        const resolved = resolveDiscoveredServerUrl(threadRef.environmentId, next);
+        if (await navigateToResolvedUrl(resolved)) {
+          recordVisitForThread(threadRef, next);
         }
-        recordVisitForThread(threadRef, next);
-      } catch (cause) {
-        toastManager.add({
-          type: "error",
-          title: "Unable to open preview server",
-          description: cause instanceof Error ? cause.message : "Preview routing is unavailable.",
-        });
+      } catch {
+        // Server-side `failed` event renders the unreachable view.
       }
     },
-    [navigateToResolvedUrl, open, runtimeTabId, threadRef],
+    [navigateToResolvedUrl, threadRef],
   );
 
   const handleRefresh = useCallback(() => {

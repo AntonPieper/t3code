@@ -124,7 +124,7 @@ describe("browser target resolver", () => {
     });
   });
 
-  it("requires a gateway-capable desktop for a public relay", async () => {
+  it("refuses public relay hosts until the authenticated gateway exists", async () => {
     readPreparedConnection.mockReturnValue({ httpBaseUrl: "https://relay.example.com" });
     const { resolveBrowserNavigationTarget } = await import("./browserTargetResolver");
     expect(() =>
@@ -132,13 +132,47 @@ describe("browser target resolver", () => {
         kind: "environment-port",
         port: 5173,
       }),
-    ).toThrow(/authenticated Preview routing/);
+    ).toThrow(/authenticated preview gateway/);
     expect(
       resolveBrowserNavigationTarget(EnvironmentId.make("environment-1"), {
         kind: "url",
         url: "http://localhost:5173",
       }),
     ).toMatchObject({ resolvedUrl: "http://localhost:5173", resolutionKind: "direct" });
+  });
+
+  it("normalizes schemeless localhost server-picker values", async () => {
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://localhost:3773" });
+    const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");
+    expect(resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "localhost:5173")).toBe(
+      "http://localhost:5173/",
+    );
+    expect(
+      resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "0.0.0.0:3000/app"),
+    ).toBe("http://localhost:3000/app");
+  });
+
+  it("maps discovered loopback servers onto a remote environment host", async () => {
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://192.168.1.25:3773" });
+    const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");
+    expect(
+      resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "localhost:3000/app"),
+    ).toBe("http://192.168.1.25:3000/app");
+  });
+
+  it("preserves localhost server-picker values when the prepared base is 127.0.0.1", async () => {
+    readPreparedConnection.mockReturnValue({ httpBaseUrl: "http://127.0.0.1:3773" });
+    const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");
+    expect(
+      resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "localhost:5173/app?x=1#top"),
+    ).toBe("http://localhost:5173/app?x=1#top");
+  });
+
+  it("normalizes public URLs without treating them as environment ports", async () => {
+    const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");
+    expect(resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "example.com/app")).toBe(
+      "https://example.com/app",
+    );
   });
 
   it("supports private IPv6 environment hosts", async () => {
@@ -178,36 +212,10 @@ describe("browser target resolver", () => {
     ).toBe("http://localhost:5173/app");
   });
 
-  it.each(["http://localhost:3773", "http://100.65.1.2:3773", "https://relay.example.com"])(
-    "routes ports through the authenticated gateway for %s",
-    async (httpBaseUrl) => {
-      readPreparedConnection.mockReturnValue({ httpBaseUrl });
-      const { resolveBrowserTargetWithGateway, discoveredServerTarget, previewUrlAtOrigin } =
-        await import("./browserTargetResolver");
-      const target = discoveredServerTarget("localhost:5173/app?mode=test#top");
-      const resolve = vi.fn(async () => "http://127.0.0.1:43210");
-      expect(
-        await resolveBrowserTargetWithGateway(EnvironmentId.make("environment-1"), target, resolve),
-      ).toMatchObject({
-        requestedUrl: "http://localhost:5173/app?mode=test#top",
-        resolvedUrl: "http://127.0.0.1:43210/app?mode=test#top",
-        resolutionKind: "authenticated-gateway",
-      });
-      expect(resolve).toHaveBeenCalledOnce();
-      expect(
-        new URL(previewUrlAtOrigin("http://127.0.0.1:43210", "//elsewhere.test/path")).origin,
-      ).toBe("http://127.0.0.1:43210");
-      await expect(
-        resolveBrowserTargetWithGateway(EnvironmentId.make("environment-1"), target, async () => {
-          throw new Error("disconnected");
-        }),
-      ).rejects.toThrow("disconnected");
-      expect(discoveredServerTarget("example.com/app")).toEqual({
-        kind: "url",
-        url: "https://example.com/app",
-      });
-    },
-  );
+  it("leaves malformed input for the normal navigation error path", async () => {
+    const { resolveDiscoveredServerUrl } = await import("./browserTargetResolver");
+    expect(resolveDiscoveredServerUrl(EnvironmentId.make("environment-1"), "   ")).toBe("   ");
+  });
 
   it("classifies exact private IPv4 and IPv6 boundaries", async () => {
     const { isPrivateNetworkHost } = await import("./browserTargetResolver");

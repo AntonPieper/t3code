@@ -142,8 +142,6 @@ import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewManager from "./preview/Manager.ts";
-import { PreviewVerification } from "./preview/Verification.ts";
-import { PreviewServers } from "./preview/Servers.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
@@ -938,14 +936,6 @@ const buildAppUnderTest = (options?: {
               PubSub.subscribe(pubsub),
             ),
           }),
-          Layer.mock(PreviewVerification)({
-            get: () => Effect.succeed({ enabled: false, run: null }),
-            changes: () => Stream.empty,
-          }),
-          Layer.mock(PreviewServers)({
-            list: () => Effect.succeed([]),
-            changes: () => Stream.empty,
-          }),
           Layer.mock(PortScanner.PortDiscovery)({
             scan: () => Effect.succeed([]),
             subscribe: () => Effect.void,
@@ -985,7 +975,6 @@ const buildAppUnderTest = (options?: {
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
-          getLatestThreadActivity: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
           getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),

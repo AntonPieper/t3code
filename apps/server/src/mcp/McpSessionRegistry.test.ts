@@ -88,12 +88,26 @@ it.effect("revokes Preview without dropping device access or another thread's br
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);
     const threadId = ThreadId.make("thread-revoke-preview");
-    const issued = yield* registry.issue({ threadId, providerInstanceId: ProviderInstanceId.make("codex"), capabilities: new Set(["preview", "device"]) });
-    const other = yield* registry.issue({ threadId: ThreadId.make("other"), providerInstanceId: ProviderInstanceId.make("codex"), capabilities: new Set(["preview"]) });
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview", "device"]),
+    });
+    const other = yield* registry.issue({
+      threadId: ThreadId.make("other"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["preview"]),
+    });
     yield* registry.revokeCapability(threadId, "preview");
-    const current = yield* registry.resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""));
+    const current = yield* registry.resolve(
+      issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+    );
     expect([...(current?.capabilities ?? [])].sort()).toEqual(["device", "pull-requests"]);
-    expect((yield* registry.resolve(other.config.authorizationHeader.replace(/^Bearer\s+/, "")))?.capabilities.has("preview")).toBe(true);
+    expect(
+      (yield* registry.resolve(
+        other.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      ))?.capabilities.has("preview"),
+    ).toBe(true);
   }),
 );
 

@@ -250,8 +250,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
-    createPortGateway: (input) =>
-      ipcRenderer.invoke(IpcChannels.PREVIEW_PORT_GATEWAY_CHANNEL, input),
     createTab: (tabId, defaults) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_CREATE_TAB_CHANNEL, {
         tabId,

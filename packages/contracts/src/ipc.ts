@@ -1227,16 +1227,6 @@ export const DesktopPreviewAutomationRequestSchema = Schema.Struct({
 });
 export type DesktopPreviewAutomationRequest = typeof DesktopPreviewAutomationRequestSchema.Type;
 
-export const DesktopPreviewPortGatewayInputSchema = Schema.Struct({
-  tabId: DesktopPreviewTabIdSchema,
-  environmentId: EnvironmentId,
-  port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
-  protocol: Schema.Literals(["http", "https"]),
-  gatewayUrl: TrimmedNonEmptyString,
-  expiresAt: Schema.Finite,
-});
-export type DesktopPreviewPortGatewayInput = typeof DesktopPreviewPortGatewayInputSchema.Type;
-
 export const DesktopPreviewAutomationCancelSchema = Schema.Struct({
   requestId: TrimmedNonEmptyString,
 });
@@ -1377,7 +1367,6 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
-  createPortGateway?: (input: DesktopPreviewPortGatewayInput) => Promise<string>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;

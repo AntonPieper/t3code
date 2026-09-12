@@ -3,7 +3,6 @@ import type {
   PreviewOpenInput,
   PreviewSessionSnapshot,
   PreviewViewportSetting,
-  PreviewEnvironmentPort,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -31,7 +30,6 @@ interface OpenPreviewSessionInput<E> {
   viewport?: PreviewViewportSetting;
   /** Overrides the configured default profile. */
   profileId?: string;
-  environmentPort?: PreviewEnvironmentPort;
 }
 
 export async function openPreviewSession<E>(
@@ -50,7 +48,6 @@ export async function openPreviewSession<E>(
     input: {
       threadId: input.threadRef.threadId,
       ...(previewBridge ? { hostingClientId: getPreviewAutomationClientId() } : {}),
-      ...(input.environmentPort ? { environmentPort: input.environmentPort } : {}),
       ...(input.url === undefined ? {} : { url: input.url }),
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),

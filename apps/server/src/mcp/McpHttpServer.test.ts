@@ -19,9 +19,6 @@ import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import { PreviewVerification } from "../preview/Verification.ts";
-import { ServerSettingsService } from "../serverSettings.ts";
-import { PreviewServers } from "../preview/Servers.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -49,22 +46,6 @@ const client = McpSchema.McpServerClient.of({
   getClient: Effect.die("unused"),
 });
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
-  Layer.provide(
-    Layer.mock(ProjectionSnapshotQuery)({
-      getThreadShellById: () => Effect.succeed(Option.none()),
-    }),
-  ),
-  Layer.provide(ServerSettingsService.layerTest()),
-  Layer.provide(Layer.mock(PreviewVerification)({ report: () => Effect.void })),
-  Layer.provide(
-    Layer.succeed(PreviewServers, {
-      start: () => Effect.die("unused"),
-      stop: () => Effect.die("unused"),
-      restart: () => Effect.die("unused"),
-      list: () => Effect.succeed([]),
-      changes: () => Stream.empty,
-    }),
-  ),
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
