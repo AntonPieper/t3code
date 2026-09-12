@@ -30,7 +30,8 @@ import {
   updatePreviewServerSnapshot,
   useThreadPreviewState,
 } from "~/previewStateStore";
-import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
+import { discoveredServerTarget } from "~/browser/browserTargetResolver";
+import { resolvePreviewNavigation } from "~/browser/previewPortGateway";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -58,6 +59,7 @@ import { PreviewUnreachable } from "./PreviewUnreachable";
 import { revealInFileExplorerLabel } from "./fileExplorerLabel";
 import { shouldShowPreviewEmptyState } from "./previewEmptyStateLogic";
 import { Badge } from "~/components/ui/badge";
+import { getPreviewAutomationClientId } from "./previewAutomationClientId";
 import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { useBrowserSurfaceStore } from "~/browser/browserSurfaceStore";
 import { usePreviewSession } from "./usePreviewSession";
@@ -128,6 +130,7 @@ export function PreviewView({
     ? new URL(environmentHttpBaseUrl).hostname
     : null;
   const open = useAtomCommand(previewEnvironment.open);
+  const close = useAtomCommand(previewEnvironment.close);
   const resize = useAtomCommand(previewEnvironment.resize, "preview viewport resize");
 
   usePreviewSession(threadRef);
@@ -150,6 +153,9 @@ export function PreviewView({
         : findActiveBrowserRecordingRuntimeTabId(threadRef, tabId)
       : null;
   const snapshot = tabId ? (previewState.sessions[tabId] ?? null) : null;
+  const hostedElsewhere = Boolean(
+    snapshot?.hostingClientId && snapshot.hostingClientId !== getPreviewAutomationClientId(),
+  );
   const desktopOverlay = tabId ? (previewState.desktopByTabId[tabId] ?? null) : null;
   const navStatus = snapshot?.navStatus ?? { _tag: "Idle" as const };
   const url = navStatus._tag === "Idle" ? "" : navStatus.url;
@@ -189,7 +195,11 @@ export function PreviewView({
     async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
         // The bridge mirrors the resolved URL back to the server.
-        await previewBridge.navigate(runtimeTabId, resolvedUrl);
+        const resolution = await resolvePreviewNavigation(threadRef.environmentId, runtimeTabId, {
+          kind: "url",
+          url: resolvedUrl,
+        });
+        await previewBridge.navigate(runtimeTabId, resolution.resolvedUrl);
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;
       }
@@ -209,6 +219,25 @@ export function PreviewView({
     [open, runtimeTabId, threadRef],
   );
 
+  const reopenHere = async () => {
+    if (!snapshot || !tabId) return;
+    const closed = await close({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId, tabId },
+    });
+    if (closed._tag === "Failure") return;
+    const result = await openPreviewSession({
+      openPreview: open,
+      threadRef,
+      ...(snapshot.navStatus._tag === "Idle" ? {} : { url: snapshot.navStatus.url }),
+      ...(snapshot.environmentPort ? { environmentPort: snapshot.environmentPort } : {}),
+      viewport: snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
+      ...(snapshot.profileId ? { profileId: snapshot.profileId } : {}),
+    });
+    if (result._tag === "Success")
+      useRightPanelStore.getState().openBrowser(threadRef, result.value.tabId);
+  };
+
   const handleSubmitUrl = useCallback(
     async (next: string) => {
       try {
@@ -226,15 +255,35 @@ export function PreviewView({
   const handleOpenServerUrl = useCallback(
     async (next: string) => {
       try {
-        const resolved = resolveDiscoveredServerUrl(threadRef.environmentId, next);
-        if (await navigateToResolvedUrl(resolved)) {
-          recordVisitForThread(threadRef, next);
+        const target = discoveredServerTarget(next);
+        if (runtimeTabId) {
+          const resolution = await resolvePreviewNavigation(
+            threadRef.environmentId,
+            runtimeTabId,
+            target,
+          );
+          await navigateToResolvedUrl(resolution.resolvedUrl);
+        } else {
+          const result = await openPreviewSession({
+            openPreview: open,
+            threadRef,
+            url: next,
+            ...(target.kind === "environment-port"
+              ? { environmentPort: { port: target.port, protocol: target.protocol ?? "http" } }
+              : {}),
+          });
+          if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         }
-      } catch {
-        // Server-side `failed` event renders the unreachable view.
+        recordVisitForThread(threadRef, next);
+      } catch (cause) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to open preview server",
+          description: cause instanceof Error ? cause.message : "Preview routing is unavailable.",
+        });
       }
     },
-    [navigateToResolvedUrl, threadRef],
+    [navigateToResolvedUrl, open, runtimeTabId, threadRef],
   );
 
   const handleRefresh = useCallback(() => {
@@ -681,7 +730,7 @@ export function PreviewView({
   // Subscribe only while visible; `toggle-panel` is owned by ChatView's
   // URL-aware handler regardless of whether the panel is currently mounted.
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || hostedElsewhere) return;
     return subscribePreviewAction((action) => {
       switch (action) {
         case "refresh":
@@ -703,80 +752,93 @@ export function PreviewView({
           return;
       }
     });
-  }, [handleRefresh, handleResetZoom, handleZoomIn, handleZoomOut, visible]);
+  }, [handleRefresh, handleResetZoom, handleZoomIn, handleZoomOut, visible, hostedElsewhere]);
 
   return (
     <div
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-thread-key={scopedThreadKey(threadRef)}
     >
-      <PreviewChromeRow
-        url={url}
-        loading={loading}
-        canGoBack={canGoBack}
-        canGoForward={canGoForward}
-        refreshDisabled={refreshDisabled}
-        focusUrlNonce={focusUrlNonce}
-        onBack={handleBack}
-        onForward={handleForward}
-        onRefresh={handleRefresh}
-        onSubmit={(next) => void handleSubmitUrl(next)}
-        onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
-        onCapture={previewBridge && tabId ? handleCapture : undefined}
-        captureDisabled={!desktopOverlay || isUnreachable}
-        recording={recordingRuntimeTabId !== null}
-        onPictureInPicture={previewBridge && tabId ? handlePictureInPicture : undefined}
-        pictureInPicture={miniPlayerTabId === tabId}
-        pictureInPictureDisabled={!desktopOverlay?.hasWebContents || isUnreachable}
-        onPickElement={previewBridge && tabId ? handlePickElement : undefined}
-        pickActive={pickActive}
-        // Disable when there's no tab (nothing to pick on) OR the page
-        // failed to load (a React overlay covers the webview, so the
-        // user wouldn't be able to actually click anything underneath).
-        pickDisabled={!tabId || isUnreachable}
-        pickDisabledReason={
-          isUnreachable ? "Page didn't load — pick unavailable until the page renders" : undefined
-        }
-        leadingActions={
-          // Only when it differs from the default: labelling every tab
-          // "Default" would be noise on the common case, while a tab in
-          // another profile is exactly what needs calling out.
-          activeProfileId !== browserDefaults.profileId ? (
-            // Capped: profile names run to 48 characters, and an unbounded
-            // badge in this row takes its width from the URL input, the only
-            // flexible element in the compact chrome. The cap sits on the
-            // badge and the truncation on an inner span, because `Badge` is an
-            // `inline-flex` with `whitespace-nowrap` — `text-overflow` never
-            // reaches a bare text node inside it, so the name would be cut off
-            // at both ends with no ellipsis.
-            <Tooltip>
-              <TooltipTrigger render={<Badge variant="outline" className="max-w-28 shrink-0" />}>
-                <span className="truncate">{activeProfileName}</span>
-              </TooltipTrigger>
-              <TooltipPopup side="top">{activeProfileName}</TooltipPopup>
-            </Tooltip>
-          ) : null
-        }
-        trailingActions={
-          previewBridge ? (
-            <PreviewMoreMenu
-              environmentId={threadRef.environmentId}
-              profileId={activeProfileId}
-              profileName={activeProfileName}
-              tabId={runtimeTabId}
-              hasWebContents={desktopOverlay?.hasWebContents ?? false}
-              zoomFactor={desktopOverlay?.zoomFactor ?? 1}
-              colorScheme={desktopOverlay?.colorScheme ?? "system"}
-              deviceToolbarVisible={viewport._tag !== "fill"}
-              onToggleDeviceToolbar={handleToggleDeviceToolbar}
-              nativePictureInPicture={desktopOverlay?.pictureInPicture ?? false}
-              onNativePictureInPicture={handleNativePictureInPicture}
-            />
-          ) : null
-        }
-      />
+      <div inert={hostedElsewhere} className="shrink-0">
+        <PreviewChromeRow
+          url={url}
+          loading={loading}
+          canGoBack={canGoBack}
+          canGoForward={canGoForward}
+          refreshDisabled={refreshDisabled}
+          focusUrlNonce={focusUrlNonce}
+          onBack={handleBack}
+          onForward={handleForward}
+          onRefresh={handleRefresh}
+          onSubmit={(next) => void handleSubmitUrl(next)}
+          onOpenInBrowser={tabId ? handleOpenInBrowser : undefined}
+          onCapture={previewBridge && tabId ? handleCapture : undefined}
+          captureDisabled={!desktopOverlay || isUnreachable}
+          recording={recordingRuntimeTabId !== null}
+          onPictureInPicture={previewBridge && tabId ? handlePictureInPicture : undefined}
+          pictureInPicture={miniPlayerTabId === tabId}
+          pictureInPictureDisabled={!desktopOverlay?.hasWebContents || isUnreachable}
+          onPickElement={previewBridge && tabId ? handlePickElement : undefined}
+          pickActive={pickActive}
+          // Disable when there's no tab (nothing to pick on) OR the page
+          // failed to load (a React overlay covers the webview, so the
+          // user wouldn't be able to actually click anything underneath).
+          pickDisabled={!tabId || isUnreachable}
+          pickDisabledReason={
+            isUnreachable ? "Page didn't load — pick unavailable until the page renders" : undefined
+          }
+          leadingActions={
+            // Only when it differs from the default: labelling every tab
+            // "Default" would be noise on the common case, while a tab in
+            // another profile is exactly what needs calling out.
+            activeProfileId !== browserDefaults.profileId ? (
+              // Capped: profile names run to 48 characters, and an unbounded
+              // badge in this row takes its width from the URL input, the only
+              // flexible element in the compact chrome. The cap sits on the
+              // badge and the truncation on an inner span, because `Badge` is an
+              // `inline-flex` with `whitespace-nowrap` — `text-overflow` never
+              // reaches a bare text node inside it, so the name would be cut off
+              // at both ends with no ellipsis.
+              <Tooltip>
+                <TooltipTrigger render={<Badge variant="outline" className="max-w-28 shrink-0" />}>
+                  <span className="truncate">{activeProfileName}</span>
+                </TooltipTrigger>
+                <TooltipPopup side="top">{activeProfileName}</TooltipPopup>
+              </Tooltip>
+            ) : null
+          }
+          trailingActions={
+            previewBridge ? (
+              <PreviewMoreMenu
+                environmentId={threadRef.environmentId}
+                profileId={activeProfileId}
+                profileName={activeProfileName}
+                tabId={runtimeTabId}
+                hasWebContents={desktopOverlay?.hasWebContents ?? false}
+                zoomFactor={desktopOverlay?.zoomFactor ?? 1}
+                colorScheme={desktopOverlay?.colorScheme ?? "system"}
+                deviceToolbarVisible={viewport._tag !== "fill"}
+                onToggleDeviceToolbar={handleToggleDeviceToolbar}
+                nativePictureInPicture={desktopOverlay?.pictureInPicture ?? false}
+                onNativePictureInPicture={handleNativePictureInPicture}
+              />
+            ) : null
+          }
+        />
+      </div>
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
+        {hostedElsewhere ? (
+          <div className="p-6 text-center text-sm text-muted-foreground">
+            <p role="status">
+              This preview is hosted by another desktop. Its agent controls and evidence are shared
+              through this environment.
+            </p>
+            <button className="mt-3 underline" onClick={() => void reopenHere()}>
+              Close that tab and reopen here
+            </button>
+          </div>
+        ) : null}
         {runtimeTabId && snapshot && !showEmptyState ? (
           <BrowserSurfaceSlot
             key={runtimeTabId}

@@ -178,6 +178,19 @@ import {
   PreviewOpenInput,
   PreviewRefreshInput,
   PreviewReportStatusInput,
+  PreviewClaimHostInput,
+  PreviewServerInput,
+  PreviewServerListInput,
+  PreviewServerList,
+  PreviewServerStatus,
+  PreviewServerError,
+  PreviewVerificationInput,
+  PreviewVerificationSetInput,
+  PreviewVerificationState,
+  PreviewVerificationError,
+  PreviewPortGatewayInput,
+  PreviewPortGatewayGrant,
+  PreviewPortGatewayError,
   PreviewResizeInput,
   PreviewSessionSnapshot,
 } from "./preview.ts";
@@ -323,6 +336,15 @@ export const WS_METHODS = {
   previewClose: "preview.close",
   previewList: "preview.list",
   previewReportStatus: "preview.reportStatus",
+  previewClaimHost: "preview.claimHost",
+  previewStartServer: "preview.startServer",
+  previewStopServer: "preview.stopServer",
+  previewRestartServer: "preview.restartServer",
+  previewServerEvents: "preview.serverEvents",
+  previewCreatePortGateway: "preview.createPortGateway",
+  previewVerificationEvents: "preview.verificationEvents",
+  previewVerificationSet: "preview.verificationSet",
+  previewVerificationCancel: "preview.verificationCancel",
   previewAutomationConnect: "previewAutomation.connect",
   previewAutomationRespond: "previewAutomation.respond",
   previewAutomationFocusHost: "previewAutomation.focusHost",
@@ -1066,6 +1088,54 @@ const WsPreviewListRpc = Rpc.make(WS_METHODS.previewList, {
   error: EnvironmentAuthorizationError,
 });
 
+const WsPreviewClaimHostRpc = Rpc.make(WS_METHODS.previewClaimHost, {
+  payload: PreviewClaimHostInput,
+  success: PreviewSessionSnapshot,
+  error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
+});
+
+const WsPreviewStartServerRpc = Rpc.make(WS_METHODS.previewStartServer, {
+  payload: PreviewServerInput,
+  success: PreviewServerStatus,
+  error: Schema.Union([PreviewServerError, EnvironmentAuthorizationError]),
+});
+const WsPreviewStopServerRpc = Rpc.make(WS_METHODS.previewStopServer, {
+  payload: PreviewServerInput,
+  error: Schema.Union([PreviewServerError, EnvironmentAuthorizationError]),
+});
+const WsPreviewRestartServerRpc = Rpc.make(WS_METHODS.previewRestartServer, {
+  payload: PreviewServerInput,
+  success: PreviewServerStatus,
+  error: Schema.Union([PreviewServerError, EnvironmentAuthorizationError]),
+});
+const WsPreviewServerEventsRpc = Rpc.make(WS_METHODS.previewServerEvents, {
+  payload: PreviewServerListInput,
+  success: PreviewServerList,
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+const WsPreviewVerificationEventsRpc = Rpc.make(WS_METHODS.previewVerificationEvents, {
+  payload: PreviewVerificationInput,
+  success: PreviewVerificationState,
+  error: Schema.Union([PreviewVerificationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+const WsPreviewVerificationSetRpc = Rpc.make(WS_METHODS.previewVerificationSet, {
+  payload: PreviewVerificationSetInput,
+  success: Schema.Void,
+  error: Schema.Union([PreviewVerificationError, EnvironmentAuthorizationError]),
+});
+const WsPreviewVerificationCancelRpc = Rpc.make(WS_METHODS.previewVerificationCancel, {
+  payload: PreviewVerificationInput,
+  success: Schema.Void,
+  error: Schema.Union([PreviewVerificationError, EnvironmentAuthorizationError]),
+});
+const WsPreviewCreatePortGatewayRpc = Rpc.make(WS_METHODS.previewCreatePortGateway, {
+  payload: PreviewPortGatewayInput,
+  success: PreviewPortGatewayGrant,
+  error: Schema.Union([PreviewPortGatewayError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
@@ -1382,6 +1452,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewCloseRpc,
   WsPreviewListRpc,
   WsPreviewReportStatusRpc,
+  WsPreviewClaimHostRpc,
+  WsPreviewStartServerRpc,
+  WsPreviewStopServerRpc,
+  WsPreviewRestartServerRpc,
+  WsPreviewServerEventsRpc,
+  WsPreviewCreatePortGatewayRpc,
+  WsPreviewVerificationEventsRpc,
+  WsPreviewVerificationSetRpc,
+  WsPreviewVerificationCancelRpc,
   WsPreviewAutomationConnectRpc,
   WsPreviewAutomationRespondRpc,
   WsPreviewAutomationFocusHostRpc,

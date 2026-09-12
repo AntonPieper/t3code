@@ -64,6 +64,7 @@ import type {
 } from "./preview.ts";
 import {
   PreviewAutomationClickInput,
+  PreviewBrowserCdpInput,
   PreviewAutomationEvaluateInput,
   PreviewAutomationHost,
   PreviewAutomationHostFocus,
@@ -71,6 +72,7 @@ import {
   PreviewAutomationResponse,
   PreviewAutomationScrollInput,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   PreviewAutomationStatus,
   PreviewAutomationStreamEvent,
   PreviewAutomationTypeInput,
@@ -1204,6 +1206,41 @@ export const DesktopPreviewAutomationWaitForInputSchema = Schema.Struct({
   input: PreviewAutomationWaitForInput,
 });
 
+/** Request lifetime crosses IPC so a disconnected host can stop physical work. */
+export const DesktopPreviewAutomationRequestSchema = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  tabId: DesktopPreviewTabIdSchema,
+  command: Schema.Union([
+    Schema.Struct({
+      operation: Schema.Literal("navigate"),
+      input: Schema.Struct({ url: TrimmedNonEmptyString }),
+    }),
+    Schema.Struct({ operation: Schema.Literal("browserCdp"), input: PreviewBrowserCdpInput }),
+    Schema.Struct({ operation: Schema.Literal("snapshot"), input: PreviewAutomationSnapshotInput }),
+    Schema.Struct({ operation: Schema.Literal("click"), input: PreviewAutomationClickInput }),
+    Schema.Struct({ operation: Schema.Literal("type"), input: PreviewAutomationTypeInput }),
+    Schema.Struct({ operation: Schema.Literal("press"), input: PreviewAutomationPressInput }),
+    Schema.Struct({ operation: Schema.Literal("scroll"), input: PreviewAutomationScrollInput }),
+    Schema.Struct({ operation: Schema.Literal("evaluate"), input: PreviewAutomationEvaluateInput }),
+    Schema.Struct({ operation: Schema.Literal("waitFor"), input: PreviewAutomationWaitForInput }),
+  ]),
+});
+export type DesktopPreviewAutomationRequest = typeof DesktopPreviewAutomationRequestSchema.Type;
+
+export const DesktopPreviewPortGatewayInputSchema = Schema.Struct({
+  tabId: DesktopPreviewTabIdSchema,
+  environmentId: EnvironmentId,
+  port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+  protocol: Schema.Literals(["http", "https"]),
+  gatewayUrl: TrimmedNonEmptyString,
+  expiresAt: Schema.Finite,
+});
+export type DesktopPreviewPortGatewayInput = typeof DesktopPreviewPortGatewayInputSchema.Type;
+
+export const DesktopPreviewAutomationCancelSchema = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+});
+
 /**
  * A System Settings pane the app can deep-link to. The identifier crosses IPC
  * rather than a URL, so the renderer can only reach these known destinations.
@@ -1340,6 +1377,7 @@ export interface DesktopBridge {
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
 export interface DesktopPreviewBridge {
+  createPortGateway?: (input: DesktopPreviewPortGatewayInput) => Promise<string>;
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
@@ -1415,8 +1453,13 @@ export interface DesktopPreviewBridge {
     onFrame: (listener: (frame: DesktopPreviewRecordingFrame) => void) => () => void;
   };
   automation: {
+    run?: (request: DesktopPreviewAutomationRequest) => Promise<unknown>;
+    cancel?: (requestId: string) => Promise<void>;
     status: (tabId: string) => Promise<DesktopPreviewAutomationStatus>;
-    snapshot: (tabId: string) => Promise<PreviewAutomationSnapshot>;
+    snapshot: (
+      tabId: string,
+      input?: PreviewAutomationSnapshotInput,
+    ) => Promise<PreviewAutomationSnapshot>;
     click: (tabId: string, input: PreviewAutomationClickInput) => Promise<void>;
     type: (tabId: string, input: PreviewAutomationTypeInput) => Promise<void>;
     press: (tabId: string, input: PreviewAutomationPressInput) => Promise<void>;

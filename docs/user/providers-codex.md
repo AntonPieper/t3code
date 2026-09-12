@@ -4,6 +4,20 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+## Experimental native browser control
+
+Codex normally uses T3 Code's portable Preview tools. If your environment already
+has OpenAI's unified-computer-use plugin installed, you can opt into its native
+CUA runtime for the same Preview. In the Codex provider's environment variables,
+set `T3CODE_CODEX_CUA=1` and set `T3CODE_CODEX_CUA_PLUGIN` to the absolute path of
+that installed plugin's `.mcp.json`. Enable project agent browser access and keep
+a desktop connected, then start a new provider session.
+
+This experimental integration currently accepts CUA runtime `0.1.0` on macOS or
+Linux. An incompatible or missing installation produces an error. Remove the
+opt-in and start a new provider session to return to portable Preview. T3 Code
+does not install or modify the OpenAI runtime.
+
 ## Use multiple accounts
 
 A shared Codex home with a shadow home lets work and personal accounts continue

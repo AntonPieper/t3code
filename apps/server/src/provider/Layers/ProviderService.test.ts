@@ -4900,11 +4900,14 @@ describe("agent browser access", () => {
     threadId: ThreadId,
     projectOverride?: boolean | { readonly browser?: boolean; readonly device?: boolean },
     options?: { readonly withoutOrchestration?: boolean },
+    exerciseReenable = false,
   ) =>
     Effect.gen(function* () {
       const enableAgentBrowserAccess = typeof access === "boolean" ? access : access.browser;
       const enableAgentDeviceAccess = typeof access === "boolean" ? access : access.device;
       const issued: Array<{ threadId: ThreadId; capabilities: ReadonlyArray<string> }> = [];
+      const revoked = yield* Deferred.make<void>();
+      const settingChanges = yield* PubSub.unbounded<import("@t3tools/contracts").ServerSettings>();
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -4919,6 +4922,7 @@ describe("agent browser access", () => {
       const projectionLayer = Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
         getTurnStartMessage: () => Effect.die("unused"),
         getImportedAgentSessionSources: () => Effect.die("unused"),
+        getLatestThreadActivity: () => Effect.die("unused"),
         getUserInputActivity: () => Effect.die("unused"),
         getCommandReadModel: () => Effect.die("unused"),
         getSnapshot: () => Effect.die("unused"),
@@ -4970,30 +4974,43 @@ describe("agent browser access", () => {
             });
             return undefined;
           }),
+        revokeMcpCapability: () =>
+          Effect.void.pipe(Effect.andThen(Deferred.succeed(revoked, undefined)), Effect.asVoid),
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
         Layer.provide(options?.withoutOrchestration ? Layer.empty : projectionLayer),
-        Layer.provide(
-          ServerSettings.ServerSettingsService.layerTest({
-            enableAgentBrowserAccess,
-            enableAgentDeviceAccess,
-            projectSettingsOverrides:
-              projectOverride === undefined
-                ? {}
-                : typeof projectOverride === "boolean"
-                  ? { [projectId]: { enableAgentBrowserAccess: projectOverride } }
-                  : {
-                      [projectId]: {
-                        ...(projectOverride.browser !== undefined
-                          ? { enableAgentBrowserAccess: projectOverride.browser }
-                          : {}),
-                        ...(projectOverride.device !== undefined
-                          ? { enableAgentDeviceAccess: projectOverride.device }
-                          : {}),
-                      },
-                    },
-          }),
+        Layer.provideMerge(
+          Layer.effect(
+            ServerSettings.ServerSettingsService,
+            Effect.gen(function* () {
+              const base = yield* ServerSettings.ServerSettingsService;
+              const subscription = yield* PubSub.subscribe(settingChanges);
+              return { ...base, streamChanges: Stream.fromSubscription(subscription) };
+            }),
+          ).pipe(
+            Layer.provide(
+              ServerSettings.ServerSettingsService.layerTest({
+                enableAgentBrowserAccess,
+                enableAgentDeviceAccess,
+                projectSettingsOverrides:
+                  projectOverride === undefined
+                    ? {}
+                    : typeof projectOverride === "boolean"
+                      ? { [projectId]: { enableAgentBrowserAccess: projectOverride } }
+                      : {
+                          [projectId]: {
+                            ...(projectOverride.browser !== undefined
+                              ? { enableAgentBrowserAccess: projectOverride.browser }
+                              : {}),
+                            ...(projectOverride.device !== undefined
+                              ? { enableAgentDeviceAccess: projectOverride.device }
+                              : {}),
+                          },
+                        },
+              }),
+            ),
+          ),
         ),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
@@ -5007,16 +5024,43 @@ describe("agent browser access", () => {
 
       yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        return yield* provider.startSession(threadId, {
+        yield* provider.startSession(threadId, {
           provider: CODEX_DRIVER,
           providerInstanceId: codexInstanceId,
           threadId,
           runtimeMode: "full-access",
         });
+        if (exerciseReenable) {
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const disabled = yield* settings.updateSettings({ enableAgentBrowserAccess: false });
+          yield* PubSub.publish(settingChanges, disabled);
+          yield* Deferred.await(revoked);
+          yield* settings.updateSettings({ enableAgentBrowserAccess: true });
+          yield* provider.sendTurn({
+            threadId,
+            input: "Browser access is restored",
+            attachments: [],
+          });
+          assert.equal(codex.stopSession.mock.calls.length, 1);
+          assert.equal(codex.startSession.mock.calls.length, 2);
+        }
       }).pipe(Effect.provide(providerLayer));
 
       return issued;
     });
+
+  it.effect(
+    "rebuilds revoked native credentials after disable and re-enable before the next turn",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("browser-reenable");
+        const issued = yield* startSessionWith(true, threadId, undefined, undefined, true);
+        assert.deepEqual(
+          issued.map((entry) => entry.threadId),
+          [threadId, threadId],
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   // The capability on the credential is the observable that matters: a session
   // always gets a credential (the pull request toolkit is never withheld), and

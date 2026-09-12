@@ -7,6 +7,7 @@ import {
   PreviewAutomationMalformedResponseError,
   PreviewAutomationNoAvailableHostError,
   PreviewAutomationTargetNotEditableError,
+  PreviewAutomationTargetNotFoundError,
   PreviewTabId,
   ProviderInstanceId,
   ThreadId,
@@ -23,6 +24,31 @@ import * as Stream from "effect/Stream";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const makeBroker = PreviewAutomationBroker.make.pipe(Effect.provide(NodeServices.layer));
+
+it.effect("forwards interrupted request cancellation to a capable physical host", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const requested = yield* Deferred.make<PreviewAutomationRequest>();
+      const cancelled = yield* Deferred.make<string>();
+      const events = yield* broker.connect(makeHost({ supportsCancellation: true }));
+      yield* Stream.runForEach(events, (event) =>
+        event.type === "request"
+          ? Deferred.succeed(requested, event.request)
+          : event.type === "cancel"
+            ? Deferred.succeed(cancelled, event.requestId)
+            : Effect.void,
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      const running = yield* broker
+        .invoke({ scope, operation: "evaluate", input: { expression: "pending" } })
+        .pipe(Effect.forkScoped);
+      const request = yield* Deferred.await(requested);
+      yield* Fiber.interrupt(running);
+      expect(yield* Deferred.await(cancelled)).toBe(request.requestId);
+    }),
+  ),
+);
 
 const scope = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -53,6 +79,7 @@ const requestsFrom = (
         onConnected(event.connectionId);
         return Result.failVoid;
       }
+      if (event.type !== "request") return Result.failVoid;
       return Result.succeed({ ...event.request, connectionId: event.connectionId });
     }),
   );
@@ -295,7 +322,7 @@ it.effect("announces a live replacement stream before delivering requests", () =
         Stream.take(2),
         Stream.runForEach((event) => {
           receivedTypes.push(event.type);
-          return event.type === "connected"
+          return event.type !== "request"
             ? Effect.void
             : broker.respond({
                 clientId: "client-1",
@@ -360,7 +387,7 @@ it.effect("preserves bounded request and remote selector diagnostics", () => {
         providerSessionId: scope.providerSessionId,
         providerInstanceId: scope.providerInstanceId,
         clientId: "client-1",
-        requestId: "preview-0",
+        requestId: expect.stringMatching(/^preview-.+-0$/),
         tabId: "tab-1",
         timeoutMs: 1_234,
         selectorKind: "locator",
@@ -380,6 +407,32 @@ it.effect("preserves bounded request and remote selector diagnostics", () => {
     }),
   );
 });
+
+it.effect("preserves missing-target recovery across the remote host boundary", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const requests = requestsFrom(yield* broker.connect(makeHost()));
+      yield* Stream.runForEach(requests, (request) =>
+        broker.respond({
+          clientId: "client-1",
+          connectionId: request.connectionId,
+          requestId: request.requestId,
+          ok: false,
+          error: { _tag: "PreviewAutomationTargetNotFoundError", message: "private page contents" },
+        }),
+      ).pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      const error = yield* broker
+        .invoke<void>({ scope, operation: "click", input: { selector: "#missing" } })
+        .pipe(Effect.flip);
+      expect(error).toBeInstanceOf(PreviewAutomationTargetNotFoundError);
+      expect(error.message).toContain("could not find the target");
+      expect(error.message).toContain("fresh snapshot");
+      expect(error.message).not.toContain("private");
+    }),
+  ),
+);
 
 it.effect("classifies a remote non-editable target without collapsing it to execution", () => {
   const remoteError = {
@@ -494,7 +547,7 @@ it.effect("distinguishes malformed remote failures", () =>
         providerSessionId: scope.providerSessionId,
         providerInstanceId: scope.providerInstanceId,
         clientId: "client-1",
-        requestId: "preview-0",
+        requestId: expect.stringMatching(/^preview-.+-0$/),
         timeoutMs: 2_000,
       });
     }),
@@ -1061,7 +1114,7 @@ it.effect("fails requests assigned to the stream that is replaced", () =>
         providerSessionId: scope.providerSessionId,
         providerInstanceId: scope.providerInstanceId,
         clientId: "client-1",
-        requestId: "preview-0",
+        requestId: expect.stringMatching(/^preview-.+-0$/),
         timeoutMs: 15_000,
       });
     }),

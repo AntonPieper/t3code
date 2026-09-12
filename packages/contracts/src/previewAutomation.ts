@@ -43,10 +43,34 @@ export const PREVIEW_AUTOMATION_OPERATIONS = [
   ...PREVIEW_AUTOMATION_V1_OPERATIONS,
   "resize",
   "setColorScheme",
+  "browserCdp",
+  "resolveUrl",
 ] as const;
 
 export const PreviewAutomationOperation = Schema.Literals(PREVIEW_AUTOMATION_OPERATIONS);
 export type PreviewAutomationOperation = typeof PreviewAutomationOperation.Type;
+
+/** Transport used by the installed Codex browser runtime, scoped to one Preview guest. */
+export const PreviewBrowserCdpInput = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("attach"), leaseId: TrimmedNonEmptyString }),
+  Schema.Struct({ kind: Schema.Literal("detach"), leaseId: TrimmedNonEmptyString }),
+  Schema.Struct({ kind: Schema.Literal("events"), leaseId: TrimmedNonEmptyString }),
+  Schema.Struct({
+    kind: Schema.Literal("send"),
+    leaseId: TrimmedNonEmptyString,
+    method: TrimmedNonEmptyString,
+    commandParams: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    sessionId: Schema.optional(Schema.String),
+  }),
+]);
+export type PreviewBrowserCdpInput = typeof PreviewBrowserCdpInput.Type;
+
+export const PreviewBrowserCdpEvent = Schema.Struct({
+  method: Schema.String,
+  params: Schema.Record(Schema.String, Schema.Unknown),
+  sessionId: Schema.optional(Schema.String),
+});
+export type PreviewBrowserCdpEvent = typeof PreviewBrowserCdpEvent.Type;
 
 const PreviewAutomationTabTargetFields = {
   tabId: Schema.optional(
@@ -527,22 +551,46 @@ export const PreviewAutomationActionEvent = Schema.Struct({
 });
 export type PreviewAutomationActionEvent = typeof PreviewAutomationActionEvent.Type;
 
+/** Optional fields keep requests from older hosts compatible with combined capture. */
+export const PreviewAutomationSnapshotInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  includeText: Schema.optional(Schema.Boolean).annotateKey({
+    description: "Include visible text and actionable elements. Defaults to true.",
+  }),
+  includeImage: Schema.optional(Schema.Boolean).annotateKey({
+    description: "Return a PNG image. Defaults to true. False with save=false skips image capture.",
+  }),
+  diagnostics: Schema.optional(
+    Schema.Array(Schema.Literals(["console", "network", "actions"])),
+  ).annotateKey({
+    description: "Requested diagnostic collectors. Defaults to none; returns their recent entries.",
+  }),
+  save: Schema.optional(Schema.Boolean).annotateKey({
+    description:
+      "Save PNG and full requested page evidence on the environment, including AX when includeText=true. Defaults to false.",
+  }),
+});
+export type PreviewAutomationSnapshotInput = typeof PreviewAutomationSnapshotInput.Type;
+
 export const PreviewAutomationSnapshot = Schema.Struct({
   url: Schema.String,
   title: Schema.String,
   loading: Schema.Boolean,
-  visibleText: Schema.String,
-  interactiveElements: Schema.Array(PreviewAutomationElement),
-  accessibilityTree: Schema.Unknown,
-  consoleEntries: Schema.Array(PreviewAutomationConsoleEntry),
-  networkEntries: Schema.Array(PreviewAutomationNetworkEntry),
-  actionTimeline: Schema.Array(PreviewAutomationActionEvent),
-  screenshot: Schema.Struct({
-    mimeType: Schema.Literal("image/png"),
-    data: Schema.String,
-    width: Schema.Int,
-    height: Schema.Int,
-  }),
+  visibleText: Schema.optional(Schema.String),
+  interactiveElements: Schema.optional(Schema.Array(PreviewAutomationElement)),
+  accessibilityTree: Schema.optional(Schema.Unknown),
+  consoleEntries: Schema.optional(Schema.Array(PreviewAutomationConsoleEntry)),
+  networkEntries: Schema.optional(Schema.Array(PreviewAutomationNetworkEntry)),
+  actionTimeline: Schema.optional(Schema.Array(PreviewAutomationActionEvent)),
+  omissions: Schema.optional(Schema.Array(Schema.String)),
+  screenshot: Schema.optional(
+    Schema.Struct({
+      mimeType: Schema.Literal("image/png"),
+      data: Schema.String,
+      width: Schema.Int,
+      height: Schema.Int,
+    }),
+  ),
 });
 export type PreviewAutomationSnapshot = typeof PreviewAutomationSnapshot.Type;
 
@@ -583,6 +631,7 @@ export const PreviewAutomationHost = Schema.Struct({
    * a newer server safely coexist with an older desktop during rollout.
    */
   supportedOperations: Schema.optional(Schema.Array(PreviewAutomationOperation)),
+  supportsCancellation: Schema.optional(Schema.Boolean),
 });
 export type PreviewAutomationHost = typeof PreviewAutomationHost.Type;
 
@@ -605,6 +654,11 @@ export const PreviewAutomationRequest = Schema.Struct({
 export type PreviewAutomationRequest = typeof PreviewAutomationRequest.Type;
 
 export const PreviewAutomationStreamEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("cancel"),
+    connectionId: PreviewAutomationConnectionId,
+    requestId: TrimmedNonEmptyString,
+  }),
   Schema.Struct({
     type: Schema.Literal("connected"),
     connectionId: PreviewAutomationConnectionId,
@@ -770,6 +824,18 @@ export class PreviewAutomationControlInterruptedError extends Schema.TaggedError
   }
 }
 
+export class PreviewAutomationTargetNotFoundError extends Schema.TaggedError<PreviewAutomationTargetNotFoundError>()(
+  "PreviewAutomationTargetNotFoundError",
+  {
+    ...PreviewAutomationRequestErrorFields,
+    ...PreviewAutomationRemoteDiagnosticFields,
+  },
+) {
+  override get message(): string {
+    return `Preview automation ${this.operation} could not find the target. Take a fresh snapshot and use a current target. Portable Preview locators do not enter iframe documents; use frame coordinates or the native browser engine for frame interaction.`;
+  }
+}
+
 export class PreviewAutomationExecutionError extends Schema.TaggedError<PreviewAutomationExecutionError>()(
   "PreviewAutomationExecutionError",
   {
@@ -926,6 +992,7 @@ export const PreviewAutomationError = Schema.Union([
   PreviewAutomationTimeoutError,
   PreviewAutomationControlInterruptedError,
   PreviewAutomationExecutionError,
+  PreviewAutomationTargetNotFoundError,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationResultTooLargeError,
@@ -936,10 +1003,16 @@ export const PreviewAutomationError = Schema.Union([
 ]);
 export type PreviewAutomationError = typeof PreviewAutomationError.Type;
 
+export const PreviewAutomationResolveUrlInput = Schema.Struct({
+  ...PreviewAutomationTabTargetFields,
+  target: BrowserNavigationTarget,
+});
+export type PreviewAutomationResolveUrlInput = typeof PreviewAutomationResolveUrlInput.Type;
+
 export const PreviewUrlResolution = Schema.Struct({
   requestedUrl: Schema.String,
   resolvedUrl: Schema.String,
-  resolutionKind: Schema.Literals(["direct", "direct-private-network"]),
+  resolutionKind: Schema.Literals(["direct", "direct-private-network", "authenticated-gateway"]),
   environmentId: EnvironmentId,
 });
 export type PreviewUrlResolution = typeof PreviewUrlResolution.Type;

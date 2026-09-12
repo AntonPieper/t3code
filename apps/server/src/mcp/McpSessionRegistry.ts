@@ -34,6 +34,10 @@ export interface McpSessionRegistryShape {
   readonly touch: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly revokeCapability: (
+    threadId: ThreadId,
+    capability: McpInvocationContext.McpCapability,
+  ) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
 }
 
@@ -203,6 +207,25 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere((record) => record.scope.threadId === threadId);
     }),
+    revokeCapability: (threadId, capability) =>
+      SynchronizedRef.update(state, ({ records }) => ({
+        records: new Map(
+          Array.from(records, ([key, record]) => [
+            key,
+            record.scope.threadId === threadId
+              ? {
+                  ...record,
+                  scope: {
+                    ...record.scope,
+                    capabilities: new Set(
+                      [...record.scope.capabilities].filter((value) => value !== capability),
+                    ),
+                  },
+                }
+              : record,
+          ]),
+        ),
+      })),
     revokeAll: SynchronizedRef.set(state, { records: new Map() }),
   });
 });
@@ -245,6 +268,18 @@ export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
 
 export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
+
+export const revokeActiveMcpCapability = (
+  threadId: ThreadId,
+  capability: McpInvocationContext.McpCapability,
+): Effect.Effect<void> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.revokeCapability(threadId, capability)
+    : Effect.void;
+
+/** Native browser transports use the same credential and revocation boundary as HTTP MCP. */
+export const resolveActiveMcpCredential = (rawToken: string) =>
+  activeMcpSessionRegistry ? activeMcpSessionRegistry.resolve(rawToken) : Effect.succeed(undefined);
 
 export const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;

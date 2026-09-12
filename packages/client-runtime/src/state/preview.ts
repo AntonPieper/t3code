@@ -1,5 +1,6 @@
 import { WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
+import * as Stream from "effect/Stream";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
@@ -17,6 +18,10 @@ export const previewAutomationHostFocusConcurrencyKey = (value: {
   };
 }): string => JSON.stringify([value.environmentId, value.input.clientId, value.input.connectionId]);
 
+// Stream atoms keep only the last value of each incoming chunk. Browser
+// commands and tab lifecycle events must survive bursts from the RPC stream.
+export const preservePreviewEvents = Stream.rechunk(1);
+
 export function createPreviewEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
@@ -29,6 +34,45 @@ export function createPreviewEnvironmentAtoms<R, E>(
       JSON.stringify([environmentId, input.threadId]),
   };
   return {
+    verification: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:preview:verification",
+      tag: WS_METHODS.previewVerificationEvents,
+    }),
+    setVerification: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:set-verification",
+      tag: WS_METHODS.previewVerificationSet,
+    }),
+    cancelVerification: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:cancel-verification",
+      tag: WS_METHODS.previewVerificationCancel,
+    }),
+    createPortGateway: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:create-port-gateway",
+      tag: WS_METHODS.previewCreatePortGateway,
+    }),
+    servers: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:preview:servers",
+      tag: WS_METHODS.previewServerEvents,
+      idleTtlMs: 0,
+    }),
+    startServer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:start-server",
+      tag: WS_METHODS.previewStartServer,
+      scheduler: lifecycleScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
+    stopServer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:stop-server",
+      tag: WS_METHODS.previewStopServer,
+      scheduler: lifecycleScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
+    restartServer: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:restart-server",
+      tag: WS_METHODS.previewRestartServer,
+      scheduler: lifecycleScheduler,
+      concurrency: lifecycleConcurrency,
+    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:preview:list",
       tag: WS_METHODS.previewList,
@@ -37,6 +81,7 @@ export function createPreviewEnvironmentAtoms<R, E>(
     events: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:preview:events",
       tag: WS_METHODS.subscribePreviewEvents,
+      transform: preservePreviewEvents,
     }),
     discoveredServers: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:preview:discovered-servers",
@@ -48,6 +93,7 @@ export function createPreviewEnvironmentAtoms<R, E>(
     automationRequests: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:preview:automation-requests",
       tag: WS_METHODS.previewAutomationConnect,
+      transform: preservePreviewEvents,
       // Automation requests are commands, not cached query data. Dispose the
       // stream immediately with its owner so stale requests cannot replay when
       // a thread remounts and the server can clear disconnected hosts promptly.
@@ -82,6 +128,10 @@ export function createPreviewEnvironmentAtoms<R, E>(
       tag: WS_METHODS.previewClose,
       scheduler: lifecycleScheduler,
       concurrency: lifecycleConcurrency,
+    }),
+    claimHost: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:claim-host",
+      tag: WS_METHODS.previewClaimHost,
     }),
     reportStatus: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:report-status",

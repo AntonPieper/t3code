@@ -29,7 +29,7 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
   readonly connectionAtom: Atom.Writable<PreviewAutomationStreamEvent["connectionId"] | null>;
   readonly environmentId: PreviewAutomationHost["environmentId"];
   readonly requestHandlerAtom: Atom.Atom<{
-    readonly handle: (request: PreviewAutomationRequest) => Promise<unknown>;
+    readonly handle: (request: PreviewAutomationRequest, signal: AbortSignal) => Promise<unknown>;
   }>;
   readonly respond: (response: PreviewAutomationResponse) => Promise<unknown>;
   readonly label: string;
@@ -42,11 +42,20 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
     let connectionExplicitlyAnnounced = false;
     let reportedConnectionId: PreviewAutomationStreamEvent["connectionId"] | null = null;
     let requestsVersion = 0;
+    const active = new Map<string, AbortController>();
+    const cancelAll = () => {
+      for (const controller of active.values()) controller.abort();
+      active.clear();
+    };
 
     const consume = (result: AutomationStreamResult<E>) => {
-      if (!AsyncResult.isSuccess(result)) return;
+      if (!AsyncResult.isSuccess(result)) {
+        if (AsyncResult.isFailure(result)) cancelAll();
+        return;
+      }
       const event = result.value;
       if (event.type === "connected") {
+        if (activeConnectionId !== event.connectionId) cancelAll();
         activeConnectionId = event.connectionId;
         connectionExplicitlyAnnounced = true;
       } else if (activeConnectionId === null) {
@@ -62,10 +71,17 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
       if (event.type === "connected") {
         return;
       }
+      if (event.type === "cancel") {
+        active.get(event.requestId)?.abort();
+        return;
+      }
       const request = event.request;
+      if (active.has(request.requestId)) return;
+      const controller = new AbortController();
+      active.set(request.requestId, controller);
       void get
         .once(options.requestHandlerAtom)
-        .handle(request)
+        .handle(request, controller.signal)
         .then(
           (value) =>
             options.respond({
@@ -89,11 +105,16 @@ export function createPreviewAutomationRequestConsumerAtom<E>(options: {
                 tabId: request.tabId ?? null,
               }),
             }),
-        );
+        )
+        .catch(() => undefined)
+        .finally(() => {
+          if (active.get(request.requestId) === controller) active.delete(request.requestId);
+        });
     };
 
     get.addFinalizer(() => {
       disposed = true;
+      cancelAll();
     });
     const initialRequest = get.once(options.requestsAtom);
     if (AsyncResult.isSuccess(initialRequest)) {

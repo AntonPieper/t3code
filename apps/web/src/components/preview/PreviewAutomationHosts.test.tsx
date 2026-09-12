@@ -6,6 +6,8 @@ import {
   type PreviewAutomationResponse,
   type PreviewAutomationStreamEvent,
   type PreviewOpenInput,
+  type PreviewEvent,
+  type PreviewListResult,
   type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
@@ -14,7 +16,11 @@ import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { __resetClientSettingsPersistenceForTests } from "~/hooks/useSettings";
-import { readThreadPreviewState, resetPreviewStateForTests } from "~/previewStateStore";
+import {
+  readThreadPreviewState,
+  reconcilePreviewServerSessions,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
 import { appAtomRegistry, AppAtomRegistryProvider } from "~/rpc/atomRegistry";
 
 import { PreviewAutomationHosts } from "./PreviewAutomationHosts";
@@ -25,8 +31,11 @@ const mocks = vi.hoisted(() => ({
   open: vi.fn(async (_target: { environmentId: EnvironmentId; input: PreviewOpenInput }) =>
     AsyncResult.success(snapshot),
   ),
-  list: vi.fn(async () => AsyncResult.success(emptyList)),
+  list: vi.fn<() => Promise<AsyncResult.Success<PreviewListResult>>>(async () =>
+    AsyncResult.success(emptyList),
+  ),
   resize: vi.fn(),
+  close: vi.fn(async () => AsyncResult.success(undefined)),
   respond:
     vi.fn<
       (target: { environmentId: EnvironmentId; input: PreviewAutomationResponse }) => Promise<void>
@@ -44,8 +53,10 @@ vi.mock("~/state/environments", () => ({
 vi.mock("~/state/preview", () => ({
   previewEnvironment: {
     automationRequests: () => requestsAtom,
+    events: () => previewEventsAtom,
     list: () => listAtom,
     open: mocks.open,
+    close: mocks.close,
     resize: mocks.resize,
     respondToAutomation: mocks.respond,
     focusAutomationHost: mocks.focus,
@@ -81,6 +92,9 @@ const snapshot: PreviewSessionSnapshot = {
 };
 const emptyList = { sessions: [], serverEpoch: "test-server", revision: 0 };
 const listAtom = Atom.make(AsyncResult.success(emptyList));
+const previewEventsAtom = Atom.make<AsyncResult.AsyncResult<PreviewEvent, Error>>(
+  AsyncResult.initial(false),
+);
 const requestsAtom = Atom.make<AsyncResult.AsyncResult<PreviewAutomationStreamEvent, Error>>(
   AsyncResult.initial(false),
 );
@@ -110,6 +124,10 @@ beforeEach(async () => {
   vi.clearAllMocks();
   mocks.getClientSettings.mockReset().mockResolvedValue(savedSettings);
   mocks.respond.mockReset();
+  mocks.list
+    .mockReset()
+    .mockResolvedValueOnce(AsyncResult.success(emptyList))
+    .mockResolvedValue(AsyncResult.success({ ...emptyList, revision: 1, sessions: [snapshot] }));
   __resetClientSettingsPersistenceForTests();
   resetPreviewStateForTests();
   appAtomRegistry.set(requestsAtom, AsyncResult.initial(false));
@@ -158,11 +176,18 @@ describe("PreviewAutomationHosts open", () => {
 
     expect(mocks.open).toHaveBeenCalledExactlyOnceWith({
       environmentId,
-      input: { threadId, viewport, profileId: "work" },
+      input: {
+        threadId,
+        viewport,
+        profileId: "work",
+        hostingClientId: expect.stringMatching(/^preview-/),
+      },
     });
     expect(mocks.getClientSettings).toHaveBeenCalledOnce();
     await expect(response.promise).resolves.toMatchObject({ requestId: "open-request", ok: true });
     expect(readThreadPreviewState(threadRef).snapshot).toEqual(snapshot);
+    reconcilePreviewServerSessions(threadRef, emptyList);
+    expect(readThreadPreviewState(threadRef).sessions[snapshot.tabId]).toEqual(snapshot);
     expect(mocks.setClientSettings).not.toHaveBeenCalled();
   });
 

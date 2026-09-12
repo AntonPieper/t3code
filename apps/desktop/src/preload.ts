@@ -250,6 +250,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     },
   },
   preview: {
+    createPortGateway: (input) =>
+      ipcRenderer.invoke(IpcChannels.PREVIEW_PORT_GATEWAY_CHANNEL, input),
     createTab: (tabId, defaults) =>
       ipcRenderer.invoke(IpcChannels.PREVIEW_CREATE_TAB_CHANNEL, {
         tabId,
@@ -322,10 +324,13 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       },
     },
     automation: {
+      run: (request) => ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_RUN_CHANNEL, request),
+      cancel: (requestId) =>
+        ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_CANCEL_CHANNEL, { requestId }),
       status: (tabId) =>
         ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_STATUS_CHANNEL, { tabId }),
-      snapshot: (tabId) =>
-        ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_SNAPSHOT_CHANNEL, { tabId }),
+      snapshot: (tabId, input) =>
+        ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_SNAPSHOT_CHANNEL, { tabId, input }),
       click: (tabId, input) =>
         ipcRenderer.invoke(IpcChannels.PREVIEW_AUTOMATION_CLICK_CHANNEL, { tabId, input }),
       type: (tabId, input) =>

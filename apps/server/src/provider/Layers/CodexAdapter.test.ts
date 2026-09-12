@@ -287,6 +287,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
 
       NodeAssert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+        browserEngine: "disabled",
         binaryPath: "codex",
         cwd: process.cwd(),
         launchArgs: "",

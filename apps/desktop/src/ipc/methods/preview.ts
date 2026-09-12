@@ -1,7 +1,10 @@
 import {
   DesktopPreviewAnnotationThemeInputSchema,
+  DesktopPreviewPortGatewayInputSchema,
   DesktopPreviewArtifactInputSchema,
   DesktopPreviewAutomationClickInputSchema,
+  DesktopPreviewAutomationRequestSchema,
+  DesktopPreviewAutomationCancelSchema,
   DesktopPreviewAutomationEvaluateInputSchema,
   DesktopPreviewAutomationPressInputSchema,
   DesktopPreviewAutomationScrollInputSchema,
@@ -25,6 +28,7 @@ import {
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationSubmissionResultSchema,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   DEFAULT_BROWSER_PROFILE_ID,
   INCOGNITO_BROWSER_PROFILE_ID,
 } from "@t3tools/contracts";
@@ -389,11 +393,14 @@ export const automationStatus = DesktopIpc.makeIpcMethod({
 
 export const automationSnapshot = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_AUTOMATION_SNAPSHOT_CHANNEL,
-  payload: DesktopPreviewTabInputSchema,
+  payload: Schema.Struct({
+    ...DesktopPreviewTabInputSchema.fields,
+    input: Schema.optional(PreviewAutomationSnapshotInput),
+  }),
   result: PreviewAutomationSnapshot,
-  handler: Effect.fn("desktop.ipc.preview.automationSnapshot")(function* ({ tabId }) {
+  handler: Effect.fn("desktop.ipc.preview.automationSnapshot")(function* ({ tabId, input }) {
     const manager = yield* PreviewManager.PreviewManager;
-    return yield* manager.automationSnapshot(tabId);
+    return yield* manager.automationSnapshot(tabId, input);
   }),
 });
 
@@ -457,6 +464,24 @@ export const automationWaitFor = DesktopIpc.makeIpcMethod({
   }),
 });
 
+export const automationRun = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_AUTOMATION_RUN_CHANNEL,
+  payload: DesktopPreviewAutomationRequestSchema,
+  result: Schema.Unknown,
+  handler: Effect.fn("desktop.ipc.preview.automationRun")(function* (request) {
+    return yield* (yield* PreviewManager.PreviewManager).automationRun(request);
+  }),
+});
+
+export const automationCancel = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_AUTOMATION_CANCEL_CHANNEL,
+  payload: DesktopPreviewAutomationCancelSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.automationCancel")(function* ({ requestId }) {
+    return yield* (yield* PreviewManager.PreviewManager).automationCancel(requestId);
+  }),
+});
+
 export const saveRecording = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_RECORDING_SAVE_CHANNEL,
   payload: DesktopPreviewRecordingSaveInputSchema,
@@ -467,7 +492,19 @@ export const saveRecording = DesktopIpc.makeIpcMethod({
   }),
 });
 
+export const createPortGateway = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PREVIEW_PORT_GATEWAY_CHANNEL,
+  payload: DesktopPreviewPortGatewayInputSchema,
+  result: Schema.String,
+  handler: Effect.fn("desktop.ipc.preview.createPortGateway")(function* (input) {
+    return yield* (yield* PreviewManager.PreviewManager).createPortGateway(input);
+  }),
+});
+
 export const methods = [
+  createPortGateway,
+  automationRun,
+  automationCancel,
   createTab,
   closeTab,
   registerWebview,

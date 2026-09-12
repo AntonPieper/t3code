@@ -14,6 +14,8 @@ import type * as Types from "effect/Types";
 import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
+import { PreviewAutomationSnapshot, type PreviewAutomationSnapshotInput } from "@t3tools/contracts";
+
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
@@ -113,12 +115,7 @@ const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;
 }>()(makeMcpAuthMiddleware).layer;
 
-/**
- * Claude Code drops every MCP result above 25k tokens (~100 KB of text) and
- * hands the agent a truncation notice instead, so a snapshot that carries the
- * full accessibility tree and 20 KB of page text loses its locators too. Keep
- * the text under that ceiling and tell the agent what was cut.
- */
+/** The selected native representation, including omission notices, fits this budget. */
 export const MAX_SNAPSHOT_TEXT_BYTES = 60_000;
 const MAX_SNAPSHOT_VISIBLE_TEXT_CHARS = 8_000;
 const MAX_SNAPSHOT_ELEMENT_NAME_CHARS = 200;
@@ -126,144 +123,139 @@ const MAX_SNAPSHOT_LOG_ENTRIES = 40;
 const MAX_SNAPSHOT_LOG_TEXT_CHARS = 500;
 const MAX_SNAPSHOT_IDENTIFIER_CHARS = 2_048;
 
+const decodeSnapshot = Schema.decodeUnknownEffect(PreviewAutomationSnapshot);
 const encodeJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-const utf8Length = (text: string) => Buffer.byteLength(text, "utf8");
 const cutText = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max)}…` : text;
 
-/** Shortens every string field of a log entry; other fields pass through. */
-const cutEntryStrings = <A>(entry: A): A =>
-  typeof entry === "object" && entry !== null
-    ? (Object.fromEntries(
+/** One value for direct consumers and native programmatic composition. Never truncate selectors. */
+const boundSnapshotMetadata = (
+  snapshot: PreviewAutomationSnapshot,
+  input: PreviewAutomationSnapshotInput,
+  artifacts: { readonly screenshotPath?: string; readonly evidencePath?: string },
+) => {
+  const omissions = (snapshot.omissions ?? []).slice(0, 10).map((value) => cutText(value, 500));
+  const bounded: Record<string, unknown> = {
+    url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
+    title: cutText(snapshot.title, MAX_SNAPSHOT_IDENTIFIER_CHARS),
+    loading: snapshot.loading,
+    ...artifacts,
+  };
+  if (
+    snapshot.url.length > MAX_SNAPSHOT_IDENTIFIER_CHARS ||
+    snapshot.title.length > MAX_SNAPSHOT_IDENTIFIER_CHARS
+  ) {
+    omissions.push(`url or title after ${MAX_SNAPSHOT_IDENTIFIER_CHARS} characters`);
+  }
+  if (snapshot.accessibilityTree !== undefined && input.includeText !== false) {
+    omissions.push("accessibilityTree (see evidencePath, or use save=true for full evidence)");
+  }
+  const lists: Record<string, ReadonlyArray<unknown>> = {};
+  if (input.includeText !== false) {
+    const visibleText = snapshot.visibleText ?? "";
+    bounded.visibleText = cutText(visibleText, MAX_SNAPSHOT_VISIBLE_TEXT_CHARS);
+    if (visibleText.length > MAX_SNAPSHOT_VISIBLE_TEXT_CHARS) {
+      omissions.push(
+        `visibleText after ${MAX_SNAPSHOT_VISIBLE_TEXT_CHARS} characters (save=true for full evidence)`,
+      );
+    }
+    const elements = snapshot.interactiveElements ?? [];
+    if (elements.some((element) => element.name.length > MAX_SNAPSHOT_ELEMENT_NAME_CHARS)) {
+      omissions.push(`element names longer than ${MAX_SNAPSHOT_ELEMENT_NAME_CHARS} characters`);
+    }
+    const usable = elements.filter(
+      (element) => Buffer.byteLength(element.selector, "utf8") <= 8_192,
+    );
+    if (usable.length < elements.length)
+      omissions.push(
+        `${elements.length - usable.length} oversized selectors (save=true for full evidence)`,
+      );
+    lists.interactiveElements = usable.map((element) => ({
+      ...element,
+      tag: cutText(element.tag, 200),
+      role: element.role === null ? null : cutText(element.role, 200),
+      name: cutText(element.name, MAX_SNAPSHOT_ELEMENT_NAME_CHARS),
+    }));
+  }
+  for (const [selection, key, label] of [
+    ["console", "consoleEntries", "console entries"],
+    ["network", "networkEntries", "network entries"],
+    ["actions", "actionTimeline", "action timeline entries"],
+  ] as const) {
+    if (!input.diagnostics?.includes(selection)) continue;
+    const entries = snapshot[key] ?? [];
+    if (entries.length > MAX_SNAPSHOT_LOG_ENTRIES)
+      omissions.push(`${entries.length - MAX_SNAPSHOT_LOG_ENTRIES} older ${label}`);
+    const kept = entries.slice(-MAX_SNAPSHOT_LOG_ENTRIES);
+    if (
+      kept.some((entry) =>
+        Object.values(entry).some(
+          (value) => typeof value === "string" && value.length > MAX_SNAPSHOT_LOG_TEXT_CHARS,
+        ),
+      )
+    ) {
+      omissions.push(`${label} text after ${MAX_SNAPSHOT_LOG_TEXT_CHARS} characters`);
+    }
+    lists[key] = kept.map((entry) =>
+      Object.fromEntries(
         Object.entries(entry).map(([key, value]) => [
           key,
           typeof value === "string" ? cutText(value, MAX_SNAPSHOT_LOG_TEXT_CHARS) : value,
         ]),
-      ) as A)
-    : entry;
-
-const hasLongString = (entry: unknown, max: number) =>
-  typeof entry === "object" &&
-  entry !== null &&
-  Object.values(entry).some((value) => typeof value === "string" && value.length > max);
-
-type SnapshotMetadata = {
-  readonly url: string;
-  readonly title: string;
-  readonly visibleText: string;
-  readonly interactiveElements: ReadonlyArray<{
-    readonly name: string;
-    readonly [key: string]: unknown;
-  }>;
-  readonly consoleEntries: ReadonlyArray<unknown>;
-  readonly networkEntries: ReadonlyArray<unknown>;
-  readonly actionTimeline: ReadonlyArray<unknown>;
-  readonly [key: string]: unknown;
-};
-
-/**
- * Drops the accessibility tree, shortens page text, element names, identifiers,
- * and log strings, keeps only the newest log entries, and finally sheds
- * interactive elements until the JSON fits. Returns the text plus notes on
- * what is missing so the agent can reach for preview_evaluate.
- */
-const boundSnapshotMetadata = (
-  metadata: SnapshotMetadata,
-): { readonly text: string; readonly omitted: ReadonlyArray<string> } => {
-  const omitted: Array<string> = [];
-  const { accessibilityTree, ...withoutTree } = metadata;
-  if (accessibilityTree !== undefined) {
-    omitted.push("accessibilityTree (use interactiveElements locators or preview_evaluate)");
-  }
-  const tail = <A>(entries: ReadonlyArray<A>, label: string) => {
-    if (entries.length > MAX_SNAPSHOT_LOG_ENTRIES) {
-      omitted.push(`${entries.length - MAX_SNAPSHOT_LOG_ENTRIES} older ${label}`);
-    }
-    const kept = entries.slice(-MAX_SNAPSHOT_LOG_ENTRIES);
-    if (kept.some((entry) => hasLongString(entry, MAX_SNAPSHOT_LOG_TEXT_CHARS))) {
-      omitted.push(`${label} text after ${MAX_SNAPSHOT_LOG_TEXT_CHARS} characters`);
-    }
-    return kept.map(cutEntryStrings);
-  };
-  if (
-    metadata.url.length > MAX_SNAPSHOT_IDENTIFIER_CHARS ||
-    metadata.title.length > MAX_SNAPSHOT_IDENTIFIER_CHARS
-  ) {
-    omitted.push(`url or title after ${MAX_SNAPSHOT_IDENTIFIER_CHARS} characters`);
-  }
-  if (
-    metadata.interactiveElements.some(
-      (element) => element.name.length > MAX_SNAPSHOT_ELEMENT_NAME_CHARS,
-    )
-  ) {
-    omitted.push(`element names longer than ${MAX_SNAPSHOT_ELEMENT_NAME_CHARS} characters`);
-  }
-  if (metadata.visibleText.length > MAX_SNAPSHOT_VISIBLE_TEXT_CHARS) {
-    omitted.push(
-      `visibleText after ${MAX_SNAPSHOT_VISIBLE_TEXT_CHARS} characters (use preview_evaluate for more)`,
+      ),
     );
   }
-  const bounded = {
-    ...withoutTree,
-    url: cutText(metadata.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
-    title: cutText(metadata.title, MAX_SNAPSHOT_IDENTIFIER_CHARS),
-    visibleText: cutText(metadata.visibleText, MAX_SNAPSHOT_VISIBLE_TEXT_CHARS),
-    interactiveElements: metadata.interactiveElements.map((element) => ({
-      ...element,
-      name: cutText(element.name, MAX_SNAPSHOT_ELEMENT_NAME_CHARS),
-    })),
-    consoleEntries: tail(metadata.consoleEntries, "console entries"),
-    networkEntries: tail(metadata.networkEntries, "network entries"),
-    actionTimeline: tail(metadata.actionTimeline, "action timeline entries"),
-  };
-
-  // Per-field caps do not sum below the ceiling: three log arrays of 40 capped
-  // entries alone can pass 60 KB. Shed the least useful lists first, halving
-  // one list per round, until the JSON fits. With every list empty the rest
-  // is bounded by the identifier and visibleText caps, so this terminates.
-  const shedOrder = [
-    "actionTimeline",
-    "networkEntries",
-    "consoleEntries",
-    "interactiveElements",
-  ] as const;
-  const lists: Record<(typeof shedOrder)[number], ReadonlyArray<unknown>> = {
-    interactiveElements: bounded.interactiveElements,
-    consoleEntries: bounded.consoleEntries,
-    networkEntries: bounded.networkEntries,
-    actionTimeline: bounded.actionTimeline,
-  };
-  const dropped: Record<(typeof shedOrder)[number], number> = {
-    interactiveElements: 0,
-    consoleEntries: 0,
-    networkEntries: 0,
-    actionTimeline: 0,
-  };
-  let text = encodeJsonText({ ...bounded, ...lists });
-  while (utf8Length(text) > MAX_SNAPSHOT_TEXT_BYTES) {
-    // Elements carry the locators, so they go last; logs shed newest-last.
-    const key =
-      shedOrder.find(
-        (candidate) => candidate !== "interactiveElements" && lists[candidate].length > 0,
-      ) ?? (lists.interactiveElements.length > 0 ? "interactiveElements" : undefined);
-    if (key === undefined) break;
-    const keep = Math.floor(lists[key].length / 2);
-    dropped[key] += lists[key].length - keep;
-    // slice(-0) keeps everything, so spell out the empty case.
+  if (snapshot.screenshot && (input.includeImage !== false || input.save)) {
+    const { data: _data, ...image } = snapshot.screenshot;
+    bounded.screenshot = image;
+  }
+  const dropped = new Map<string, number>();
+  const value = () => ({
+    ...bounded,
+    ...lists,
+    omissions: [
+      ...omissions,
+      ...Array.from(
+        dropped,
+        ([key, count]) =>
+          `${count} ${key} omitted to fit observation (save=true for full evidence)`,
+      ),
+    ],
+  });
+  let result = value();
+  let text = encodeJsonText(result);
+  while (Buffer.byteLength(text, "utf8") > MAX_SNAPSHOT_TEXT_BYTES) {
+    const key = ["actionTimeline", "networkEntries", "consoleEntries", "interactiveElements"].find(
+      (key) => (lists[key]?.length ?? 0) > 0,
+    );
+    if (!key) {
+      // JSON escaping can expand one input character into six output bytes.
+      // Preserve identity and omission notices while shortening free-form page text.
+      const field = ["visibleText", "title", "url"].find(
+        (field) => typeof bounded[field] === "string" && bounded[field].length > 128,
+      );
+      if (!field) throw new Error("Preview metadata could not fit the observation budget.");
+      const previous = String(bounded[field]);
+      bounded[field] = cutText(previous, Math.floor(previous.length / 2));
+      if (!dropped.has(field)) dropped.set(field, 0);
+      dropped.set(field, dropped.get(field)! + previous.length - String(bounded[field]).length);
+      result = value();
+      text = encodeJsonText(result);
+      continue;
+    }
+    const entries = lists[key]!;
+    const keep = Math.floor(entries.length / 2);
+    dropped.set(key, (dropped.get(key) ?? 0) + entries.length - keep);
     lists[key] =
       keep === 0
         ? []
         : key === "interactiveElements"
-          ? lists[key].slice(0, keep)
-          : lists[key].slice(-keep);
-    text = encodeJsonText({ ...bounded, ...lists });
+          ? entries.slice(0, keep)
+          : entries.slice(-keep);
+    result = value();
+    text = encodeJsonText(result);
   }
-  for (const key of shedOrder) {
-    if (dropped[key] > 0) {
-      omitted.push(`${dropped[key]} of ${bounded[key].length} ${key}`);
-    }
-  }
-  return { text, omitted };
+  return { value: result, text };
 };
 
 export class PreviewScreenshotSaveError extends Schema.TaggedError<PreviewScreenshotSaveError>()(
@@ -272,6 +264,15 @@ export class PreviewScreenshotSaveError extends Schema.TaggedError<PreviewScreen
 ) {
   override get message(): string {
     return `Could not save preview screenshot to ${this.screenshotPath}.`;
+  }
+}
+
+class PreviewSnapshotComponentError extends Schema.TaggedError<PreviewSnapshotComponentError>()(
+  "PreviewSnapshotComponentError",
+  { component: Schema.String },
+) {
+  override get message() {
+    return `The Preview host omitted the requested ${this.component}. Reconnect or update the hosting desktop and retry.`;
   }
 }
 
@@ -324,6 +325,10 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
     typeof firstFailure._tag === "string"
       ? firstFailure._tag
       : "PreviewSnapshotError";
+  const message =
+    firstFailure instanceof Error
+      ? cutText(firstFailure.message, 2_000)
+      : `Preview snapshot failed: ${errorTag}. Check the requested options and hosting desktop, then retry.`;
   const result = new McpSchema.CallToolResult({
     isError: true,
     structuredContent: {
@@ -331,10 +336,17 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
         _tag: errorTag,
         operation: "snapshot",
         failureCount: failures.length,
+        message,
       },
     },
-    // Agents usually see only the text content, so name the tag there too.
-    content: [{ type: "text", text: `Preview snapshot failed: ${errorTag}.` }],
+    content: [
+      {
+        type: "text",
+        text: encodeJsonText({
+          error: { _tag: errorTag, operation: "snapshot", failureCount: failures.length, message },
+        }),
+      },
+    ],
   });
   return Effect.logWarning("preview snapshot failed", {
     operation: "snapshot",
@@ -383,52 +395,46 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.flatMap(({ encodedResult }) =>
             Effect.gen(function* () {
-              const snapshot = encodedResult as SnapshotMetadata & {
-                readonly url: string;
-                readonly screenshot: {
-                  readonly mimeType: "image/png";
-                  readonly data: string;
-                  readonly width: number;
-                  readonly height: number;
-                };
-              };
-              const { screenshot, ...page } = snapshot;
-              const png = new Uint8Array(Buffer.from(screenshot.data, "base64"));
+              const snapshot = yield* decodeSnapshot(encodedResult);
+              const input = payload ?? {};
+              const screenshot = snapshot.screenshot;
+              const png =
+                screenshot && (input.includeImage !== false || input.save === true)
+                  ? new Uint8Array(Buffer.from(screenshot.data, "base64"))
+                  : undefined;
+              if (!png && (input.includeImage !== false || input.save === true)) {
+                return yield* new PreviewSnapshotComponentError({ component: "screenshot" });
+              }
               const screenshotPath =
-                payload?.save === true ? yield* saveScreenshot(snapshot.url, png) : undefined;
-              const metadata = {
-                ...page,
-                screenshot: {
-                  mimeType: screenshot.mimeType,
-                  width: screenshot.width,
-                  height: screenshot.height,
-                },
+                input.save === true && png ? yield* saveScreenshot(snapshot.url, png) : undefined;
+              const evidencePath = screenshotPath?.replace(/\.png$/, ".json");
+              if (evidencePath) {
+                const fileSystem = yield* FileSystem.FileSystem;
+                const { screenshot: _screenshot, ...page } = snapshot;
+                yield* fileSystem
+                  .writeFileString(evidencePath, encodeJsonText({ ...page, screenshotPath }))
+                  .pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new PreviewScreenshotSaveError({ screenshotPath: evidencePath, cause }),
+                    ),
+                  );
+              }
+              const bounded = boundSnapshotMetadata(snapshot, input, {
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
-              };
-              const bounded = boundSnapshotMetadata(metadata);
+                ...(evidencePath === undefined ? {} : { evidencePath }),
+              });
+              const includeImage = input.includeImage !== false && png !== undefined;
               return new McpSchema.CallToolResult({
                 isError: false,
-                structuredContent: metadata,
+                // Direct Codex selects structuredContent instead of content, including its images.
+                ...(includeImage ? {} : { structuredContent: bounded.value }),
                 content: [
-                  // Keep the page identity readable even if a provider truncates the snapshot.
-                  {
-                    type: "text",
-                    text: encodeJsonText({
-                      url: cutText(snapshot.url, MAX_SNAPSHOT_IDENTIFIER_CHARS),
-                    }),
-                  },
+                  // URL stays first in the bounded observation for native website icons.
                   { type: "text", text: bounded.text },
-                  ...(bounded.omitted.length === 0
-                    ? []
-                    : [
-                        {
-                          type: "text" as const,
-                          text: `Snapshot text was bounded. Omitted: ${bounded.omitted.join("; ")}.`,
-                        },
-                      ]),
-                  ...(payload?.includeImage === false
-                    ? []
-                    : [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]),
+                  ...(includeImage
+                    ? [{ type: "image" as const, data: png, mimeType: "image/png" }]
+                    : []),
                 ],
               });
             }),

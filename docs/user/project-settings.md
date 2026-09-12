@@ -15,6 +15,9 @@ or a project override. Click it to see that chain on every selected environment.
 be reset to inherit again. Settings that cannot be overridden by a project are shown read-only
 while a project is selected.
 
+Disabling browser access stops current Preview automation. Changes to the agent’s browser tools
+apply on its next turn, including when you re-enable access.
+
 When the selected environments disagree, the control shows **Mixed** in place of a value and the
 layers icon turns amber. Picking a value applies it to every selected environment.
 

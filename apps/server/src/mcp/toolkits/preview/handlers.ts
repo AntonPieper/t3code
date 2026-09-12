@@ -1,10 +1,15 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
+import { resolveProjectScripts } from "@t3tools/shared/projectScripts";
+import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   PREVIEW_RECORDING_STOP_TIMEOUT_MS,
   PreviewAutomationRecordingTransferError,
+  PreviewServerError,
   PreviewAutomationRecordingDesktopUpdateRequiredError,
   PreviewAutomationRecordingArtifact,
   type ToolActivityIcon,
@@ -17,6 +22,7 @@ import {
   type PreviewAutomationSnapshot,
   type PreviewAutomationStatus,
   type PreviewTabId,
+  type PreviewUrlResolution,
 } from "@t3tools/contracts";
 
 import {
@@ -30,6 +36,8 @@ import * as ServerConfig from "../../../config.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
+import { PreviewVerification } from "../../../preview/Verification.ts";
+import { PreviewServers } from "../../../preview/Servers.ts";
 
 /**
  * Collapses the `show` alias onto `open` and defaults tab reuse.
@@ -187,20 +195,76 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
 });
 
 const handlers = {
+  preview_verification_report: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const verification = yield* PreviewVerification;
+      yield* verification.report(scope.threadId, input);
+      return {};
+    }),
+  preview_servers: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const servers = yield* PreviewServers;
+      const projections = yield* ProjectionSnapshotQuery;
+      const settings = yield* ServerSettingsService;
+      const configuredScripts = yield* Effect.gen(function* () {
+        const thread = yield* projections.getThreadShellById(scope.threadId);
+        const project = Option.isSome(thread)
+          ? yield* projections.getProjectShellById(thread.value.projectId)
+          : Option.none();
+        return Option.isSome(project)
+          ? resolveProjectScripts(yield* settings.getSettings, project.value)
+              .filter((script) => input.scriptId === undefined || script.id === input.scriptId)
+              .map((script) => ({
+                scriptId: script.id,
+                name: script.name,
+                previewUrl: script.previewUrl ?? null,
+              }))
+          : [];
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PreviewServerError({
+              threadId: scope.threadId,
+              scriptId: input.scriptId ?? "",
+              message: "Could not read configured preview scripts.",
+              cause,
+            }),
+        ),
+      );
+      return {
+        configuredScripts,
+        servers: (yield* servers.list(scope.threadId)).filter(
+          (server) => input.scriptId === undefined || server.scriptId === input.scriptId,
+        ),
+      };
+    }),
+  preview_server_control: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+      const servers = yield* PreviewServers;
+      yield* servers[input.action]({ threadId: scope.threadId, scriptId: input.scriptId });
+      return { servers: yield* servers.list(scope.threadId) };
+    }),
   preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   preview_open: (input) =>
     invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+  preview_resolve_url: (input) => invokeTargeted<PreviewUrlResolution>("resolveUrl", input),
   preview_navigate: (input) =>
     invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
   preview_resize: (input) =>
     invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
   preview_set_appearance: (input) =>
     invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
-  preview_snapshot: (input) => {
-    // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
-    const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
-  },
+  preview_snapshot: (input) =>
+    invokeTargeted<PreviewAutomationSnapshot>("snapshot", {
+      ...input,
+      includeText: input?.includeText ?? true,
+      includeImage: input?.includeImage ?? true,
+      save: input?.save ?? false,
+      diagnostics: input?.diagnostics ?? [],
+    }),
   preview_click: (input) => invokeTargeted<object>("click", input, input.timeoutMs),
   preview_type: (input) => invokeTargeted<object>("type", input, input.timeoutMs),
   preview_press: (input) => invokeTargeted<object>("press", input),

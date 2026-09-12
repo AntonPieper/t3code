@@ -745,6 +745,54 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  it.effect(
+    "preserves human, automation, peer and continuation provenance in the native prompt stream",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        for (const messageOrigin of [
+          { kind: "human" },
+          { kind: "automation" },
+          { kind: "peer", from: "source-thread" },
+        ] as const) {
+          yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: "Use a Workflow to verify the change",
+            messageOrigin,
+          });
+        }
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "Continue",
+          continuation: true,
+        });
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 4),
+        );
+        assert.deepEqual(
+          messages.map((message) => message.origin),
+          [
+            { kind: "human" },
+            { kind: "task-notification" },
+            { kind: "peer", from: "source-thread" },
+            { kind: "auto-continuation" },
+          ],
+        );
+        assert.equal(messages[0]?.isSynthetic, undefined);
+        assert.deepEqual(messages[0]?.message.content, messages[1]?.message.content);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("treats ultrathink as a prompt keyword instead of a session effort", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

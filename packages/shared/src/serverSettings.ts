@@ -280,6 +280,7 @@ export function applyServerSettingsPatch(
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
+    previewVerificationThreads: previewVerificationThreadsPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -335,6 +336,14 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
+      : {}),
+    ...(previewVerificationThreadsPatch !== undefined
+      ? {
+          previewVerificationThreads: mergeSettingsEntries(
+            current.previewVerificationThreads,
+            previewVerificationThreadsPatch,
+          ),
+        }
       : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {

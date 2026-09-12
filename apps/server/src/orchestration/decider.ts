@@ -1281,6 +1281,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.expectedCompletedTurnId !== undefined &&
+        (targetThread.latestTurn?.turnId !== command.expectedCompletedTurnId ||
+          targetThread.latestTurn.state !== "completed" ||
+          targetThread.session?.activeTurnId != null ||
+          hasQueuedTurnStartForThread(targetThread, command.createdAt))
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Newer work superseded this automatic follow-up.",
+        });
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1338,6 +1349,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.messageOrigin ? { messageOrigin: command.messageOrigin } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
@@ -1405,6 +1417,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.turn-interrupt-requested",
         payload: {
           threadId: command.threadId,
+          ...(command.expectedUserMessageAt !== undefined
+            ? { expectedUserMessageAt: command.expectedUserMessageAt }
+            : {}),
           ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
           createdAt: command.createdAt,
         },

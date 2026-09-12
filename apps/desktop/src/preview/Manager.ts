@@ -10,6 +10,10 @@ import { DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER } from "@t3tools/contracts";
 import type {
   DesktopPreviewAnnotationTheme,
   DesktopPreviewAutomationStatus,
+  DesktopPreviewAutomationRequest,
+  DesktopPreviewPortGatewayInput,
+  PreviewBrowserCdpInput,
+  PreviewBrowserCdpEvent,
   DesktopPreviewColorScheme,
   DesktopPreviewFavicon,
   DesktopPreviewPointerEvent,
@@ -28,9 +32,11 @@ import type {
   PreviewAutomationNetworkEntry,
   PreviewAutomationScrollInput,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
 } from "@t3tools/contracts";
+import { makePreviewPortGateways } from "./PortGateway.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
 import {
@@ -55,6 +61,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Schedule from "effect/Schedule";
@@ -476,6 +483,7 @@ interface BrowserControlSession {
     event: Electron.Event,
     method: string,
     params: Record<string, unknown>,
+    sessionId?: string,
   ) => void;
 }
 
@@ -619,6 +627,11 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   artifactDirectory: string,
   pictureInPicturePreloadPath: string,
 ) {
+  const gatewayClock = yield* Clock.clockWith(Effect.succeed);
+  const portGateways = yield* Effect.acquireRelease(
+    Effect.sync(() => makePreviewPortGateways(() => gatewayClock.currentTimeMillisUnsafe())),
+    (gateways) => Effect.promise(() => gateways.close()),
+  );
   const fileSystem = yield* FileSystem.FileSystem;
   const hostPlatform = yield* HostProcessPlatform;
   const path = yield* Path.Path;
@@ -644,6 +657,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     ReadonlyMap<number, BrowserControlSession>
   >(new Map());
   const diagnosticsRef = yield* Ref.make<ReadonlyMap<number, BrowserDiagnostics>>(new Map());
+  const nativeBrowserLeases = new Map<
+    number,
+    {
+      readonly leaseId: string;
+      readonly epoch: number;
+      readonly queue: Queue.Queue<PreviewBrowserCdpEvent, PreviewOperationError>;
+    }
+  >();
   const expectedAgentInputsRef = yield* Ref.make<
     ReadonlyMap<string, ReadonlyArray<ExpectedAgentInput>>
   >(new Map());
@@ -1213,6 +1234,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const detachControlSession = Effect.fn("PreviewManager.detachControlSession")(function* (
     webContentsId: number,
   ) {
+    const lease = nativeBrowserLeases.get(webContentsId);
+    nativeBrowserLeases.delete(webContentsId);
+    if (lease)
+      yield* Queue.fail(
+        lease.queue,
+        new PreviewOperationError({
+          operation: "browserCdp",
+          webContentsId,
+          cause: new Error("Preview guest detached; obtain a fresh tab attachment."),
+        }),
+      );
     const control = yield* SynchronizedRef.modify(controlSessionsRef, (sessions) => [
       sessions.get(webContentsId),
       replaceMap(sessions, (copy) => {
@@ -1308,7 +1340,34 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             }
             yield* captureDiagnosticMessage(wc.id, method, params);
           });
-          const onMessage: BrowserControlSession["onMessage"] = (_event, method, params) => {
+          const onMessage: BrowserControlSession["onMessage"] = (
+            _event,
+            method,
+            params,
+            sessionId,
+          ) => {
+            const lease = nativeBrowserLeases.get(wc.id);
+            if (lease)
+              runFork(
+                Queue.offer(lease.queue, {
+                  method,
+                  params,
+                  ...(sessionId ? { sessionId } : {}),
+                }).pipe(
+                  Effect.flatMap((accepted) =>
+                    accepted
+                      ? Effect.void
+                      : Queue.fail(
+                          lease.queue,
+                          new PreviewOperationError({
+                            operation: "browserCdp.events",
+                            webContentsId: wc.id,
+                            cause: new Error("Browser event queue overflow; reattach the tab."),
+                          }),
+                        ),
+                  ),
+                ),
+              );
             runFork(handleDebuggerMessage(method, params));
           };
           yield* Scope.addFinalizer(
@@ -1422,6 +1481,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       checkControl: Effect.Effect<void, PreviewManagerError>,
     ) => Effect.Effect<A, PreviewManagerError>,
   ) {
+    if (nativeBrowserLeases.has(wc.id))
+      return yield* new PreviewOperationError({
+        operation: action,
+        tabId,
+        webContentsId: wc.id,
+        cause: new Error(
+          "This guest is controlled by native CUA. Release that attachment before using portable actions.",
+        ),
+      });
     const sequence = yield* nextCounter(actionSequenceRef);
     const startedAt = yield* currentIso;
     const millis = yield* currentMillis;
@@ -1435,6 +1503,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const epoch = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
     const control = yield* ensureControlSession(wc);
     const execute = Effect.fn("PreviewManager.executeControlAction")(function* () {
+      if (nativeBrowserLeases.has(wc.id))
+        return yield* new PreviewOperationError({
+          operation: action,
+          tabId,
+          cause: new Error("Native CUA now owns this guest."),
+        });
       yield* update(tabId, { controller: "agent" });
       const checkControl = Effect.gen(function* () {
         const currentEpoch = (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0;
@@ -1483,6 +1557,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const finalize = Effect.fn("PreviewManager.finalizeControlAction")(function* (
       exit: Exit.Exit<A, PreviewManagerError>,
     ) {
+      if (Exit.hasInterrupts(exit) && (action === "evaluate" || action === "waitFor")) {
+        // Chromium work must stop before this control permit is released to the next action.
+        yield* attemptPromise({ operation: "automationCancel", tabId, webContentsId: wc.id }, () =>
+          control.debugger.sendCommand("Runtime.terminateExecution"),
+        ).pipe(Effect.timeout(2_000), Effect.ignore);
+      }
       const completedAt = yield* currentIso;
       if (exit._tag === "Success") {
         yield* replaceAction(tabId, {
@@ -1860,6 +1940,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           copy.set(tabId, (epochs.get(tabId) ?? 0) + 1);
         }),
       );
+      yield* cancelAutomationForTab(tabId);
+      const nativeLease = nativeBrowserLeases.get(wc.id);
+      if (nativeLease)
+        yield* browserCdp(tabId, { kind: "detach", leaseId: nativeLease.leaseId }).pipe(
+          Effect.ignore,
+        );
       yield* update(tabId, { controller: "human" });
       yield* Effect.sleep(750);
       const tabs = yield* SynchronizedRef.get(tabsRef);
@@ -2059,6 +2145,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   const closeTabUnlocked = Effect.fn("PreviewManager.closeTabUnlocked")(function* (tabId: string) {
     if (!(yield* SynchronizedRef.get(tabsRef)).has(tabId)) return;
+    yield* Effect.promise(() => portGateways.release(tabId));
     clearPendingRecording(tabId);
     yield* Effect.all(
       [
@@ -2113,6 +2200,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return [true, new Set([...closingTabIds, tabId])] as const;
     });
     if (!claimed) return;
+    yield* cancelAutomationForTab(tabId);
     return yield* withTabLifecycleLock(tabId, closeTabUnlocked(tabId)).pipe(
       Effect.ensuring(
         Ref.update(closingTabIdsRef, (closingTabIds) => {
@@ -3551,21 +3639,30 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const captureAutomationSnapshot = Effect.fn("PreviewManager.captureAutomationSnapshot")(
-    function* (tabId: string, wc: Electron.WebContents, send: SendCommand) {
-      yield* Effect.all([send("Runtime.enable"), send("Accessibility.enable")], {
-        concurrency: 2,
-        discard: true,
-      });
-      const page = yield* evaluateWithDebugger<{
-        url: string;
-        title: string;
-        loading: boolean;
-        visibleText: string;
-        interactiveElements: PreviewAutomationSnapshot["interactiveElements"];
-      }>(
-        tabId,
-        send,
-        `(() => {
+    function* (
+      tabId: string,
+      wc: Electron.WebContents,
+      send: SendCommand,
+      input: PreviewAutomationSnapshotInput,
+    ) {
+      const includeText = input.includeText !== false;
+      const includeImage = input.includeImage !== false || input.save === true;
+      // Old servers send no capture options and require every legacy result field.
+      const legacy = Object.keys(input).length === 0;
+      const diagnosticsRequested =
+        input.diagnostics ?? (legacy ? ["console", "network", "actions"] : []);
+      if (includeText) yield* send("Runtime.enable");
+      const page = includeText
+        ? yield* evaluateWithDebugger<{
+            url: string;
+            title: string;
+            loading: boolean;
+            visibleText: string;
+            interactiveElements: PreviewAutomationSnapshot["interactiveElements"];
+          }>(
+            tabId,
+            send,
+            `(() => {
           const selectorFor = (element) => {
             if (element.id) return "#" + CSS.escape(element.id);
             for (const attribute of ["data-testid", "name"]) {
@@ -3595,12 +3692,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           };
           const elements = Array.from(document.querySelectorAll(
             "a[href],button,input,textarea,select,[role],[tabindex]"
-          )).filter(visible).slice(0, ${MAX_INTERACTIVE_ELEMENTS}).map((element) => {
+          )).filter(visible);
+          const selected = elements.slice(0, ${input.save ? "Infinity" : MAX_INTERACTIVE_ELEMENTS}).map((element) => {
             const rect = element.getBoundingClientRect();
             return {
               tag: element.tagName.toLowerCase(),
               role: element.getAttribute("role"),
-              name: (element.getAttribute("aria-label") || element.innerText || element.getAttribute("name") || "").slice(0, ${MAX_INTERACTIVE_ELEMENT_NAME_LENGTH}),
+              name: (element.getAttribute("aria-label") || element.innerText || element.getAttribute("name") || "").slice(0, ${input.save ? "Infinity" : MAX_INTERACTIVE_ELEMENT_NAME_LENGTH}),
               selector: selectorFor(element),
               x: rect.x,
               y: rect.y,
@@ -3612,55 +3710,69 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             url: location.href,
             title: document.title,
             loading: document.readyState !== "complete",
-            visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
-            interactiveElements: elements
+            visibleText: (document.body?.innerText || "").slice(0, ${input.save ? "Infinity" : MAX_VISIBLE_TEXT_LENGTH}),
+            interactiveElements: selected,
+            omissions: [
+              ...(elements.length > selected.length ? [String(elements.length - selected.length) + " additional interactiveElements (save=true for full evidence)"] : []),
+              ...(!${input.save === true} && (document.body?.innerText.length ?? 0) > ${MAX_VISIBLE_TEXT_LENGTH} ? ["visibleText after ${MAX_VISIBLE_TEXT_LENGTH} characters (save=true for full evidence)"] : [])
+            ]
           };
         })()`,
-        true,
-      );
-      const [accessibility, sourceImage, diagnostics, timelines] = yield* Effect.all([
-        send("Accessibility.getFullAXTree"),
-        capturePageWithRetry(
-          {
-            operation: "automationSnapshot.capturePage",
-            tabId,
-            webContentsId: wc.id,
-          },
-          tabId,
-          wc,
-        ),
-        Ref.get(diagnosticsRef),
-        Ref.get(actionTimelineRef),
-      ]);
-      const sourceSize = sourceImage.getSize();
-      const image =
-        sourceSize.width > MAX_SCREENSHOT_WIDTH
-          ? sourceImage.resize({ width: MAX_SCREENSHOT_WIDTH })
-          : sourceImage;
-      const size = image.getSize();
-      const browserDiagnostics = diagnostics.get(wc.id);
+            true,
+          )
+        : { url: wc.getURL(), title: wc.getTitle(), loading: wc.isLoading() };
+      const accessibilityTree =
+        includeText && (input.save === true || legacy)
+          ? yield* send("Accessibility.enable").pipe(
+              Effect.andThen(send("Accessibility.getFullAXTree")),
+            )
+          : undefined;
+      const screenshot = includeImage
+        ? yield* Effect.gen(function* () {
+            const sourceImage = yield* capturePageWithRetry(
+              { operation: "automationSnapshot.capturePage", tabId, webContentsId: wc.id },
+              tabId,
+              wc,
+            );
+            const image =
+              sourceImage.getSize().width > MAX_SCREENSHOT_WIDTH
+                ? sourceImage.resize({ width: MAX_SCREENSHOT_WIDTH })
+                : sourceImage;
+            const size = image.getSize();
+            return {
+              mimeType: "image/png" as const,
+              data: image.toPNG().toString("base64"),
+              width: size.width,
+              height: size.height,
+            };
+          })
+        : undefined;
+      const browserDiagnostics =
+        diagnosticsRequested.length > 0 ? (yield* Ref.get(diagnosticsRef)).get(wc.id) : undefined;
       return {
         ...page,
-        accessibilityTree: accessibility,
-        consoleEntries: [...(browserDiagnostics?.consoleEntries ?? [])],
-        networkEntries: [...(browserDiagnostics?.networkEntries ?? [])],
-        actionTimeline: [...(timelines.get(tabId) ?? [])],
-        screenshot: {
-          mimeType: "image/png" as const,
-          data: image.toPNG().toString("base64"),
-          width: size.width,
-          height: size.height,
-        },
+        ...(accessibilityTree === undefined ? {} : { accessibilityTree }),
+        ...(diagnosticsRequested.includes("console")
+          ? { consoleEntries: [...(browserDiagnostics?.consoleEntries ?? [])] }
+          : {}),
+        ...(diagnosticsRequested.includes("network")
+          ? { networkEntries: [...(browserDiagnostics?.networkEntries ?? [])] }
+          : {}),
+        ...(diagnosticsRequested.includes("actions")
+          ? { actionTimeline: [...((yield* Ref.get(actionTimelineRef)).get(tabId) ?? [])] }
+          : {}),
+        ...(screenshot === undefined ? {} : { screenshot }),
       };
     },
   );
 
   const automationSnapshot = Effect.fn("PreviewManager.automationSnapshot")(function* (
     tabId: string,
+    input: PreviewAutomationSnapshotInput = {},
   ) {
     const wc = yield* requireWebContents(tabId);
     return yield* withControlSession(tabId, wc, "snapshot", (send) =>
-      captureAutomationSnapshot(tabId, wc, send),
+      captureAutomationSnapshot(tabId, wc, send, input),
     );
   });
 
@@ -4464,7 +4576,284 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         }),
     ).pipe(Effect.asVoid);
 
+  const browserCdp = Effect.fn("PreviewManager.browserCdp")(function* (
+    tabId: string,
+    input: PreviewBrowserCdpInput,
+  ) {
+    const wc = yield* requireWebContents(tabId);
+    const control = yield* ensureControlSession(wc);
+    const validate = Effect.gen(function* () {
+      const lease = nativeBrowserLeases.get(wc.id);
+      if (
+        !lease ||
+        lease.leaseId !== input.leaseId ||
+        lease.epoch !== ((yield* Ref.get(controlEpochRef)).get(tabId) ?? 0)
+      ) {
+        return yield* new PreviewAutomationControlInterruptedError({
+          operation: "browserCdp",
+          tabId,
+          webContentsId: wc.id,
+        });
+      }
+      return lease;
+    });
+    if (input.kind === "events") {
+      const lease = yield* validate;
+      const events = yield* Queue.takeAll(lease.queue).pipe(Effect.timeoutOption(10_000));
+      yield* validate;
+      return Option.getOrElse(events, () => []);
+    }
+    // Interception replies unblock commands such as Page.navigate that hold the
+    // control permit. They must run concurrently, but only for the current lease.
+    if (
+      input.kind === "send" &&
+      /^(Fetch\.(continueRequest|continueResponse|fulfillRequest|failRequest|continueWithAuth)|Runtime\.runIfWaitingForDebugger)$/.test(
+        input.method,
+      )
+    ) {
+      yield* validate;
+      const result = yield* attemptPromise(
+        { operation: `browserCdp.${input.method}`, tabId, webContentsId: wc.id },
+        () =>
+          control.debugger.sendCommand(input.method, input.commandParams ?? {}, input.sessionId),
+      ).pipe(
+        Effect.timeout(12_000),
+        Effect.mapError(
+          (cause) => new PreviewOperationError({ operation: "browserCdp", tabId, cause }),
+        ),
+      );
+      yield* validate;
+      return result;
+    }
+    const operation = control.semaphore.withPermit(
+      Effect.gen(function* () {
+        if (input.kind === "detach") {
+          const lease = nativeBrowserLeases.get(wc.id);
+          if (lease?.leaseId !== input.leaseId) return {};
+          nativeBrowserLeases.delete(wc.id);
+          yield* Queue.fail(
+            lease.queue,
+            new PreviewOperationError({
+              operation: "browserCdp",
+              tabId,
+              cause: new Error("Browser attachment released."),
+            }),
+          );
+          // Drain native execution before releasing interception and physical control.
+          for (const [method, params] of [
+            ["Runtime.terminateExecution", {}],
+            ["Page.stopLoading", {}],
+            ["Fetch.disable", {}],
+            [
+              "Target.setAutoAttach",
+              { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
+            ],
+            ["Emulation.setFocusEmulationEnabled", { enabled: false }],
+            ["Runtime.enable", {}],
+          ] as const) {
+            yield* attemptPromise(
+              { operation: "browserCdp.release", tabId, webContentsId: wc.id },
+              () => control.debugger.sendCommand(method, params),
+            ).pipe(Effect.timeout(2_000), Effect.ignore);
+          }
+          yield* update(tabId, { controller: "none" });
+          return {};
+        }
+        if (input.kind === "attach") {
+          const current = nativeBrowserLeases.get(wc.id);
+          if (current && current.leaseId !== input.leaseId)
+            return yield* new PreviewOperationError({
+              operation: "browserCdp.attach",
+              tabId,
+              cause: new Error("Another native attachment owns this guest. Release it first."),
+            });
+          if (!current)
+            nativeBrowserLeases.set(wc.id, {
+              leaseId: input.leaseId,
+              epoch: (yield* Ref.get(controlEpochRef)).get(tabId) ?? 0,
+              queue: yield* Queue.dropping<PreviewBrowserCdpEvent, PreviewOperationError>(512),
+            });
+          // CUA enables Runtime after subscribing; that replays its initial execution contexts.
+          yield* attemptPromise(
+            { operation: "browserCdp.attach", tabId, webContentsId: wc.id },
+            () => control.debugger.sendCommand("Runtime.disable"),
+          );
+          yield* validate;
+          yield* update(tabId, { controller: "agent" });
+          return {};
+        }
+        yield* validate;
+        if (
+          input.method !== "Target.setAutoAttach" &&
+          !/^(Accessibility|CSS|DOM|DOMSnapshot|Emulation|Fetch|Input|Log|Network|Page|Performance|Runtime)\.[A-Za-z]+$/.test(
+            input.method,
+          )
+        ) {
+          return yield* new PreviewOperationError({
+            operation: "browserCdp",
+            tabId,
+            cause: new Error(`Unsupported guest CDP command: ${input.method}`),
+          });
+        }
+        const params = input.commandParams ?? {};
+        if (
+          input.method === "Input.dispatchMouseEvent" &&
+          params.type === "mousePressed" &&
+          typeof params.x === "number" &&
+          typeof params.y === "number"
+        ) {
+          yield* expectAgentInput(tabId, {
+            kind: "pointer",
+            x: params.x,
+            y: params.y,
+            button: params.button === "right" ? 2 : params.button === "middle" ? 1 : 0,
+          });
+        }
+        if (
+          input.method === "Input.dispatchKeyEvent" &&
+          (params.type === "keyDown" || params.type === "rawKeyDown") &&
+          typeof params.key === "string" &&
+          typeof params.code === "string"
+        ) {
+          yield* expectAgentInput(tabId, { kind: "key", key: params.key, code: params.code });
+        }
+        const result = yield* attemptPromise(
+          { operation: `browserCdp.${input.method}`, tabId, webContentsId: wc.id },
+          () => control.debugger.sendCommand(input.method, params, input.sessionId),
+        ).pipe(
+          Effect.timeout(12_000),
+          Effect.onExit((exit) => {
+            if (Exit.isSuccess(exit)) return Effect.void;
+            const cleanup =
+              input.method === "Runtime.evaluate" || input.method === "Runtime.callFunctionOn"
+                ? "Runtime.terminateExecution"
+                : input.method === "Page.navigate" || input.method === "Page.reload"
+                  ? "Page.stopLoading"
+                  : undefined;
+            return cleanup === undefined
+              ? Effect.void
+              : attemptPromise(
+                  { operation: "browserCdp.cancel", tabId, webContentsId: wc.id },
+                  () => control.debugger.sendCommand(cleanup, {}, input.sessionId),
+                ).pipe(Effect.timeout(2_000), Effect.ignore);
+          }),
+          Effect.mapError(
+            (cause) => new PreviewOperationError({ operation: "browserCdp", tabId, cause }),
+          ),
+        );
+        yield* validate;
+        return result;
+      }),
+    );
+    // Detach owns bounded physical cleanup even if its caller is cancelled.
+    return yield* input.kind === "detach" ? Effect.uninterruptible(operation) : operation;
+  });
+
+  const automationRequests = new Map<
+    string,
+    { readonly tabId: string; readonly cancel: Effect.Effect<void> }
+  >();
+  const cancelAutomationForTab = (tabId: string) =>
+    Effect.suspend(() =>
+      Effect.all(
+        [...automationRequests.values()]
+          .filter((request) => request.tabId === tabId)
+          .map((request) => request.cancel),
+        { concurrency: "unbounded", discard: true },
+      ),
+    );
+  const automationCancel = (requestId: string) =>
+    Effect.suspend(() => automationRequests.get(requestId)?.cancel ?? Effect.void);
+  const automationRun = Effect.fn("PreviewManager.automationRun")(function* (
+    request: DesktopPreviewAutomationRequest,
+  ) {
+    const { tabId, command, requestId } = request;
+    const requestGuest = yield* requireWebContents(tabId);
+    if (automationRequests.has(requestId)) {
+      return yield* new PreviewOperationError({
+        operation: command.operation,
+        tabId,
+        cause: new Error("Duplicate automation request."),
+      });
+    }
+    const cancelled = yield* Deferred.make<void>();
+    const drained = yield* Deferred.make<void>();
+    let wasCancelled = false;
+    const cancel = Effect.gen(function* () {
+      wasCancelled = true;
+      yield* Deferred.succeed(cancelled, undefined);
+      yield* Deferred.await(drained);
+    });
+    const requestState = { tabId, cancel };
+    automationRequests.set(requestId, requestState);
+    const work: Effect.Effect<unknown, PreviewManagerError> = (() => {
+      switch (command.operation) {
+        case "navigate":
+          return withControlSession(tabId, requestGuest, "navigate", (_send, cleanup) =>
+            navigate(tabId, command.input.url).pipe(
+              Effect.onExit((exit) =>
+                Exit.isFailure(exit)
+                  ? cleanup("Page.stopLoading").pipe(Effect.ignore)
+                  : Effect.void,
+              ),
+            ),
+          );
+        case "browserCdp":
+          return browserCdp(tabId, command.input);
+        case "snapshot":
+          return automationSnapshot(tabId, command.input);
+        case "click":
+          return automationClick(tabId, command.input);
+        case "type":
+          return automationType(tabId, command.input);
+        case "press":
+          return automationPress(tabId, command.input);
+        case "scroll":
+          return automationScroll(tabId, command.input);
+        case "evaluate":
+          return automationEvaluate(tabId, command.input);
+        case "waitFor":
+          return automationWaitFor(tabId, command.input);
+      }
+    })();
+    return yield* Effect.raceFirst(
+      work,
+      Deferred.await(cancelled).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new PreviewAutomationControlInterruptedError({
+              operation: command.operation,
+              tabId,
+              webContentsId: requestGuest.id,
+            }),
+          ),
+        ),
+      ),
+    ).pipe(
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          if (
+            (wasCancelled || Exit.isFailure(exit)) &&
+            command.operation === "browserCdp" &&
+            (wasCancelled || command.input.kind === "attach")
+          ) {
+            yield* browserCdp(tabId, { kind: "detach", leaseId: command.input.leaseId }).pipe(
+              Effect.ignore,
+            );
+          }
+          if (automationRequests.get(requestId) === requestState)
+            automationRequests.delete(requestId);
+          yield* Deferred.succeed(drained, undefined);
+        }),
+      ),
+    );
+  });
+
   const destroy = Effect.fn("PreviewManager.destroy")(function* () {
+    yield* Effect.all(
+      [...automationRequests.values()].map((request) => request.cancel),
+      { concurrency: "unbounded", discard: true },
+    );
     const tabs = yield* SynchronizedRef.get(tabsRef);
     yield* Effect.forEach(tabs.keys(), closeTab, { discard: true });
     yield* Effect.all(
@@ -4480,7 +4869,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
 
   yield* Effect.addFinalizer(() => destroy().pipe(Effect.ignore));
 
+  const createPortGateway = (input: DesktopPreviewPortGatewayInput) =>
+    withTabLifecycleLock(
+      input.tabId,
+      Effect.gen(function* () {
+        if (!(yield* SynchronizedRef.get(tabsRef)).has(input.tabId))
+          return yield* new PreviewTabNotFoundError({ tabId: input.tabId });
+        return yield* attemptPromise({ operation: "createPortGateway", tabId: input.tabId }, () =>
+          portGateways.open(input),
+        );
+      }),
+    );
   return {
+    createPortGateway,
+    automationRun,
+    automationCancel,
     automationClick,
     automationEvaluate,
     automationPress,
@@ -4835,6 +5238,9 @@ export class PreviewManager extends Context.Service<
       tabId: string,
       webContentsId: number,
     ) => Effect.Effect<void, PreviewManagerError>;
+    readonly createPortGateway: (
+      input: DesktopPreviewPortGatewayInput,
+    ) => Effect.Effect<string, PreviewManagerError>;
     readonly navigate: (tabId: string, url: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goBack: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goForward: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
@@ -4890,8 +5296,13 @@ export class PreviewManager extends Context.Service<
     readonly automationStatus: (
       tabId: string,
     ) => Effect.Effect<DesktopPreviewAutomationStatus, PreviewManagerError>;
+    readonly automationRun: (
+      request: DesktopPreviewAutomationRequest,
+    ) => Effect.Effect<unknown, PreviewManagerError>;
+    readonly automationCancel: (requestId: string) => Effect.Effect<void>;
     readonly automationSnapshot: (
       tabId: string,
+      input?: PreviewAutomationSnapshotInput,
     ) => Effect.Effect<PreviewAutomationSnapshot, PreviewManagerError>;
     readonly automationClick: (
       tabId: string,
@@ -4953,6 +5364,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,
+    createPortGateway: operations.createPortGateway,
     navigate: operations.navigate,
     goBack: operations.goBack,
     goForward: operations.goForward,
@@ -5004,6 +5416,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     stopRecording: operations.stopRecording,
     saveRecording: operations.saveRecording,
     automationStatus: operations.automationStatus,
+    automationRun: operations.automationRun,
+    automationCancel: operations.automationCancel,
     automationSnapshot: operations.automationSnapshot,
     automationClick: operations.automationClick,
     automationType: operations.automationType,

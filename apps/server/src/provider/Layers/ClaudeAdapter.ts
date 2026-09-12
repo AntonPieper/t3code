@@ -1470,10 +1470,17 @@ function buildPromptText(
 
 function buildUserMessage(input: {
   readonly sdkContent: Array<Record<string, unknown>>;
+  readonly messageOrigin?: ProviderSendTurnInput["messageOrigin"];
+  readonly continuation?: boolean | undefined;
 }): SDKUserMessage {
   return {
     type: "user",
     session_id: "",
+    origin: input.continuation
+      ? { kind: "auto-continuation" }
+      : input.messageOrigin?.kind === "automation"
+        ? { kind: "task-notification" }
+        : (input.messageOrigin ?? { kind: "unclassified" }),
     parent_tool_use_id: null,
     message: {
       role: "user",
@@ -1577,7 +1584,11 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     sdkContent.push({ type: "text", text });
   }
 
-  return buildUserMessage({ sdkContent });
+  return buildUserMessage({
+    sdkContent,
+    messageOrigin: input.messageOrigin,
+    continuation: input.continuation,
+  });
 });
 
 /**
@@ -4721,6 +4732,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
+          // Keep fresh rendering on resume: snapshot:true ignores later appended
+          // application guidance and model/settings changes until compaction.
           // Model and effort can change after this session-level prompt is set.
           append: buildRuntimeInstructions({ harness: "Claude Code" }),
         },

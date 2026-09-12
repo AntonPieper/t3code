@@ -2,6 +2,7 @@ import { previewBridge } from "~/components/preview/previewBridge";
 
 import { browserDefaultTabState, resolveBrowserDefaults } from "./browserDefaults";
 import { stopBrowserRecording } from "./browserRecording";
+import { forgetPreviewPortGateway } from "./previewPortGateway";
 
 interface DesktopTabLease {
   references: number;
@@ -67,6 +68,7 @@ export function acquireDesktopTab(tabId: string): AcquiredDesktopTab {
         void enqueueDesktopTabOperation(tabId, async () => {
           await stopBrowserRecording(tabId).catch(() => null);
           await previewBridge?.closeTab(tabId);
+          forgetPreviewPortGateway(tabId);
         }).catch(() => undefined);
       }, 0);
     },

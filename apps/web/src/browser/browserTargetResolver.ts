@@ -25,12 +25,10 @@ const resolveEnvironmentPortTarget = (
   environmentId: EnvironmentId,
   target: Extract<BrowserNavigationTarget, { readonly kind: "environment-port" }>,
   environmentUrl: URL,
-  requestedUrl?: string,
-  sourceUrl?: URL,
 ): PreviewUrlResolution => {
   if (!isPrivateNetworkHost(environmentUrl.hostname)) {
     throw new Error(
-      "This environment port needs the planned authenticated preview gateway; its server address is not directly private-network reachable.",
+      "This environment port requires an updated desktop host with authenticated Preview routing.",
     );
   }
   const protocol = target.protocol ?? "http";
@@ -43,15 +41,11 @@ const resolveEnvironmentPortTarget = (
     : normalizedEnvironmentHost.includes(":")
       ? `[${normalizedEnvironmentHost}]`
       : normalizedEnvironmentHost;
-  const resolved = sourceUrl
-    ? new URL(sourceUrl)
-    : new URL(path, `${protocol}://${resolvedHost}:${target.port}`);
-  if (sourceUrl) {
-    resolved.hostname = resolvedHost;
-    resolved.port = String(target.port);
-  }
+  const resolved = new URL(
+    previewUrlAtOrigin(`${protocol}://${resolvedHost}:${target.port}`, path),
+  );
   return {
-    requestedUrl: requestedUrl ?? `${protocol}://localhost:${target.port}${path}`,
+    requestedUrl: `${protocol}://localhost:${target.port}${path}`,
     resolvedUrl: resolved.toString(),
     resolutionKind: isLocalLoopbackHost(normalizedEnvironmentHost)
       ? "direct"
@@ -75,24 +69,43 @@ export function resolveBrowserNavigationTarget(
   return resolveEnvironmentPortTarget(environmentId, target, readEnvironmentUrl(environmentId));
 }
 
-export function resolveDiscoveredServerUrl(environmentId: EnvironmentId, rawUrl: string): string {
-  try {
-    const normalizedUrl = normalizePreviewUrl(rawUrl);
-    const parsed = new URL(normalizedUrl);
-    if (!isLoopbackHost(parsed.hostname)) return normalizedUrl;
-    return resolveEnvironmentPortTarget(
-      environmentId,
-      {
-        kind: "environment-port",
-        port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
-        protocol: parsed.protocol === "https:" ? "https" : "http",
-        path: `${parsed.pathname}${parsed.search}${parsed.hash}`,
-      },
-      readEnvironmentUrl(environmentId),
-      rawUrl,
-      parsed,
-    ).resolvedUrl;
-  } catch {
-    return rawUrl;
-  }
+/** Ports reported by the environment must never silently fall back to client localhost. */
+export function discoveredServerTarget(rawUrl: string): BrowserNavigationTarget {
+  const url = new URL(normalizePreviewUrl(rawUrl));
+  if (!isLoopbackHost(url.hostname)) return { kind: "url", url: url.href };
+  return {
+    kind: "environment-port",
+    port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+    protocol: url.protocol === "https:" ? "https" : "http",
+    path: `${url.pathname}${url.search}${url.hash}`,
+  };
+}
+
+export function previewUrlAtOrigin(origin: string, path = "/"): string {
+  // Treat a leading // or backslash as path data, never as another authority.
+  const parsed = new URL(`http://localhost/${path.replace(/^\/+/, "").replaceAll("\\", "%5C")}`);
+  const resolved = new URL(origin);
+  resolved.pathname = parsed.pathname;
+  resolved.search = parsed.search;
+  resolved.hash = parsed.hash;
+  return resolved.href;
+}
+
+export async function resolveBrowserTargetWithGateway(
+  environmentId: EnvironmentId,
+  target: BrowserNavigationTarget,
+  createGateway: (
+    target: Extract<BrowserNavigationTarget, { kind: "environment-port" }>,
+  ) => Promise<string>,
+): Promise<PreviewUrlResolution> {
+  if (target.kind === "url") return resolveBrowserNavigationTarget(environmentId, target);
+  return {
+    environmentId,
+    requestedUrl: previewUrlAtOrigin(
+      `${target.protocol ?? "http"}://localhost:${target.port}`,
+      target.path,
+    ),
+    resolvedUrl: previewUrlAtOrigin(await createGateway(target), target.path),
+    resolutionKind: "authenticated-gateway",
+  };
 }

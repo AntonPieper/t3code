@@ -85,6 +85,7 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import { PreviewAutomationBroker } from "../../mcp/PreviewAutomationBroker.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -256,6 +257,7 @@ export interface ProviderServiceLiveOptions {
    * test see whether a credential was requested at all.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
+  readonly revokeMcpCapability?: typeof McpSessionRegistry.revokeActiveMcpCapability;
 }
 
 interface TurnAnalyticsMetadata {
@@ -479,11 +481,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const previewBroker = yield* Effect.serviceOption(PreviewAutomationBroker);
+  const browserAccessAtStart = new Map<ThreadId, boolean>();
+  const revokedBrowserSessions = new Set<ThreadId>();
   const projectionQuery = yield* Effect.serviceOption(
     ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   );
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
+  const revokeMcpCapability =
+    options?.revokeMcpCapability ?? McpSessionRegistry.revokeActiveMcpCapability;
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -867,8 +874,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    * whereas the reverse costs an agent one toolset and is visible immediately.
    */
   const agentAccessSettings = Effect.fn("ProviderService.agentAccessSettings")(
-    function* (threadId: ThreadId) {
-      const settings = yield* serverSettings.getSettings;
+    function* (threadId: ThreadId, observedSettings?: import("@t3tools/contracts").ServerSettings) {
+      const settings = observedSettings ?? (yield* serverSettings.getSettings);
       const entries = Object.values(settings.projectSettingsOverrides);
       const browserOverridden = entries.some(
         (entry) => entry.enableAgentBrowserAccess !== undefined,
@@ -943,6 +950,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     Effect.gen(function* () {
       const capabilities = yield* agentAccessCapabilities(threadId);
+      browserAccessAtStart.set(threadId, capabilities.has("preview"));
+      revokedBrowserSessions.delete(threadId);
       const credential = yield* issueMcpCredential({ threadId, providerInstanceId, capabilities });
       if (credential) {
         const deviceEnvironment = capabilities.has("device")
@@ -961,6 +970,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
+
+  yield* serverSettings.streamChanges.pipe(
+    Stream.runForEach((observedSettings) =>
+      Effect.forEach(
+        [...browserAccessAtStart],
+        ([threadId, enabled]) =>
+          Effect.gen(function* () {
+            if (!enabled || (yield* agentAccessSettings(threadId, observedSettings)).browser)
+              return;
+            revokedBrowserSessions.add(threadId);
+            yield* revokeMcpCapability(threadId, "preview");
+            if (Option.isSome(previewBroker)) yield* previewBroker.value.cancelThread(threadId);
+          }),
+        { discard: true },
+      ),
+    ),
+    Effect.forkScoped,
+  );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1087,6 +1114,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const canonicalEvent = yield* Effect.sync(() =>
         correlateRuntimeEventWithInstance(source, event),
       );
+      if (
+        (canonicalEvent.type === "turn.completed" ||
+          canonicalEvent.type === "turn.aborted" ||
+          canonicalEvent.type === "session.exited") &&
+        Option.isSome(previewBroker)
+      ) {
+        yield* previewBroker.value.cancelThread(canonicalEvent.threadId);
+      }
       yield* increment(providerRuntimeEventsTotal, {
         provider: canonicalEvent.provider,
         eventType: canonicalEvent.type,
@@ -1692,6 +1727,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           allowRecovery: true,
         });
       }
+      const previousBrowserAccess = browserAccessAtStart.get(input.threadId);
+      if (
+        revokedBrowserSessions.has(input.threadId) ||
+        (previousBrowserAccess !== undefined &&
+          previousBrowserAccess !== (yield* agentAccessSettings(input.threadId)).browser)
+      ) {
+        // Credentials and native tool configuration belong to the subprocess. Resume through
+        // the existing recovery path when access changes, retaining native conversation history.
+        if (Option.isSome(previewBroker)) yield* previewBroker.value.cancelThread(input.threadId);
+        yield* routed.adapter.stopSession(input.threadId);
+        routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.sendTurn",
+          allowRecovery: true,
+        });
+      }
       metricProvider = routed.adapter.provider;
       metricModel = input.modelSelection?.model;
       yield* Effect.annotateCurrentSpan({
@@ -1872,6 +1923,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               const turn = yield* sendTurn({
                 threadId,
                 input: compaction.command,
+                messageOrigin: { kind: "automation" },
                 ...(modelSelection !== undefined ? { modelSelection } : {}),
               }).pipe(
                 Effect.onError(() =>
@@ -1922,6 +1974,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.thread_id": input.threadId,
           "provider.turn_id": input.turnId,
         });
+        if (Option.isSome(previewBroker)) yield* previewBroker.value.cancelThread(routed.threadId);
         yield* routed.adapter.interruptTurn(routed.threadId, input.turnId);
         yield* analytics.record("provider.turn.interrupted", {
           provider: routed.adapter.provider,
@@ -2044,6 +2097,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               input.threadId,
             );
           }
+          if (Option.isSome(previewBroker))
+            yield* previewBroker.value.cancelThread(routed.threadId);
           yield* routed.adapter.stopSession(routed.threadId);
         }
         const pendingCompaction = pendingCompactions.get(input.threadId);
@@ -2053,6 +2108,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         timedOutNativeCompactions.delete(input.threadId);
         yield* clearTurnAnalyticsSession(routed.instanceId, input.threadId);
         yield* clearMcpSession(input.threadId);
+        browserAccessAtStart.delete(input.threadId);
+        revokedBrowserSessions.delete(input.threadId);
         yield* directory.upsert({
           threadId: input.threadId,
           provider: routed.adapter.provider,

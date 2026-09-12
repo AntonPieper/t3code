@@ -36,11 +36,15 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
+import { makeCodexMcpRefresh } from "./CodexMcpRefresh.ts";
+import { readMcpProviderSession } from "../../mcp/McpProviderSession.ts";
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
+  buildCodexApplicationContext,
   buildCodexDeveloperInstructions,
+  type CodexBrowserEngine,
   type T3CodeToolAvailability,
 } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
@@ -64,6 +68,12 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "does not exist",
   "no rollout found",
 ];
+
+/** 0.154 is the first version exercised with T3's typed application-context binding. */
+export function supportsCodexApplicationContext(userAgent: string): boolean {
+  const match = /\/(\d+)\.(\d+)\.(\d+)(?:\s|$)/.exec(userAgent);
+  return match !== null && (Number(match[1]) > 0 || Number(match[2]) >= 154);
+}
 
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
@@ -140,15 +150,8 @@ const McpElicitationForm = Schema.Struct({
 const isMcpElicitationMetadata = Schema.is(McpElicitationMetadata);
 const isMcpElicitationForm = Schema.is(McpElicitationForm);
 
-// TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
-// `V2TurnStartParams` schema includes `collaborationMode` directly.
-const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams.pipe(
-  Schema.fieldsAssign({
-    collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
-  }),
-);
 const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffect(
-  CodexTurnStartParamsWithCollaborationMode,
+  EffectCodexSchema.V2TurnStartParams,
 );
 const CodexChildResumeMetadata = Schema.Struct({
   thread: Schema.Struct({ id: Schema.String }),
@@ -157,8 +160,7 @@ const CodexChildResumeMetadata = Schema.Struct({
 });
 const decodeCodexChildResumeMetadata = Schema.decodeUnknownEffect(CodexChildResumeMetadata);
 
-export type CodexTurnStartParamsWithCollaborationMode =
-  typeof CodexTurnStartParamsWithCollaborationMode.Type;
+export type CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams;
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
@@ -167,6 +169,7 @@ type CodexThreadItem =
   | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
 
 export interface CodexSessionRuntimeOptions {
+  readonly browserEngine?: CodexBrowserEngine;
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
@@ -585,6 +588,8 @@ function buildCodexCollaborationMode(input: {
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly browserToolsAvailable?: boolean | T3CodeToolAvailability;
+  readonly nativeApplicationContext?: boolean | T3CodeToolAvailability;
+  readonly browserEngine?: CodexBrowserEngine;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -596,11 +601,14 @@ function buildCodexCollaborationMode(input: {
     settings: {
       model,
       reasoning_effort: reasoningEffort,
-      developer_instructions: buildCodexDeveloperInstructions(
-        input.interactionMode,
-        { model, reasoningEffort },
-        input.browserToolsAvailable ?? true,
-      ),
+      developer_instructions: input.nativeApplicationContext
+        ? null
+        : buildCodexDeveloperInstructions(
+            input.interactionMode,
+            { model, reasoningEffort },
+            input.browserToolsAvailable ?? true,
+            input.browserEngine,
+          ),
     },
   };
 }
@@ -619,6 +627,8 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean | T3CodeToolAvailability;
+  readonly nativeApplicationContext?: boolean | T3CodeToolAvailability;
+  readonly browserEngine?: CodexBrowserEngine;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -635,11 +645,17 @@ export function buildTurnStartParams(input: {
   }
 
   const config = runtimeModeToThreadConfig(input.runtimeMode);
+  const tools =
+    typeof input.browserToolsAvailable === "object"
+      ? input.browserToolsAvailable
+      : { browser: input.browserToolsAvailable ?? true, device: false };
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
+    nativeApplicationContext: input.nativeApplicationContext ?? false,
+    ...(input.browserEngine ? { browserEngine: input.browserEngine } : {}),
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -652,6 +668,19 @@ export function buildTurnStartParams(input: {
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     ...(collaborationMode ? { collaborationMode } : {}),
+    ...(input.nativeApplicationContext
+      ? {
+          additionalContext: {
+            "t3.application": {
+              kind: "application",
+              value: buildCodexApplicationContext(
+                tools.browser ? (input.browserEngine ?? "preview") : "disabled",
+                tools.device,
+              ),
+            },
+          },
+        }
+      : {}),
   }).pipe(
     Effect.mapError((cause) =>
       CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
@@ -1305,6 +1334,15 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    const nativeApplicationContextRef = yield* Ref.make(false);
+    let refreshMcp:
+      | ((force?: boolean) => Effect.Effect<void, CodexErrors.CodexAppServerError>)
+      | undefined;
+    let mcpRefreshRevision = readMcpProviderSession(options.threadId)?.refreshRevision ?? 0;
+    const failedMcpServers = new Set<string>();
+    const observedNativeTools = new Set<string>();
+    let mcpCredentialRevision = 0;
+    let refreshedCredentialRevision = 0;
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1941,6 +1979,23 @@ export const makeCodexSessionRuntime = (
         if (isMemoryConsolidationNotification) {
           return;
         }
+        if (notification.method === "item/started") {
+          const item = notification.params.item;
+          const tool =
+            item.type === "mcpToolCall"
+              ? `${item.server}/${item.tool}`
+              : item.type === "dynamicToolCall"
+                ? `${item.namespace ?? "native"}/${item.tool}`
+                : item.type;
+          if (!observedNativeTools.has(tool) && observedNativeTools.size < 128) {
+            observedNativeTools.add(tool);
+            yield* Effect.logDebug("Codex native capability observed", {
+              binaryPath: options.binaryPath,
+              tool: tool.slice(0, 256),
+              evidence: "item/started",
+            });
+          }
+        }
 
         let requestId: ApprovalRequestId | undefined;
         let requestKind: ProviderRequestKind | undefined;
@@ -2282,6 +2337,25 @@ export const makeCodexSessionRuntime = (
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
 
+    yield* client.handleServerNotification("mcpServer/startupStatus/updated", (payload) =>
+      Effect.logDebug("Codex MCP startup observed", {
+        server: payload.name,
+        status: payload.status,
+      }).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            if (payload.status === "failed") failedMcpServers.add(payload.name);
+            else if (payload.status === "ready") failedMcpServers.delete(payload.name);
+          }),
+        ),
+      ),
+    );
+    yield* client.handleServerNotification("mcpServer/oauthLogin/completed", () =>
+      Effect.sync(() => {
+        mcpCredentialRevision += 1;
+      }),
+    );
+
     const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
       client.handleServerNotification(method, (params) =>
         Queue.offer(serverNotifications, makeCodexServerNotification(method, params)).pipe(
@@ -2364,8 +2438,32 @@ export const makeCodexSessionRuntime = (
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-      yield* client.request("initialize", buildCodexInitializeParams());
+      const initialized = yield* client.request("initialize", buildCodexInitializeParams());
+      const nativeApplicationContext = supportsCodexApplicationContext(initialized.userAgent);
+      yield* Ref.set(nativeApplicationContextRef, nativeApplicationContext);
+      yield* Effect.logDebug("Codex application context compatibility", {
+        binaryPath: options.binaryPath,
+        userAgent: initialized.userAgent,
+        nativeApplicationContext,
+        nativeCodeMode: "unknown",
+        nativeToolSearch: "unknown",
+        capabilityEvidence:
+          "Capabilities are recorded when observed; feature defaults alone do not establish tool exposure.",
+      });
       yield* client.notify("initialized", undefined);
+      refreshMcp = yield* makeCodexMcpRefresh({
+        configuration: client
+          .request("config/read", { cwd: options.cwd, includeLayers: false })
+          .pipe(Effect.map(({ config }) => config)),
+        reload: client.request("config/mcpServer/reload", undefined),
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning(
+            "Codex configuration observation unavailable; explicit refresh remains available.",
+            { message: cause.message },
+          ).pipe(Effect.as(undefined)),
+        ),
+      );
 
       const requestedModel = normalizeCodexModelSlug(options.model);
 
@@ -2434,15 +2532,25 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          if (hasConfiguredMcpServer(options.appServerArgs)) {
-            yield* client.request("config/mcpServer/reload", undefined).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
-                  cause,
-                }),
-              ),
-            );
-          }
+          const revision = readMcpProviderSession(options.threadId)?.refreshRevision ?? 0;
+          const credentialRevision = mcpCredentialRevision;
+          const explicitRefresh =
+            revision !== mcpRefreshRevision ||
+            credentialRevision !== refreshedCredentialRevision ||
+            failedMcpServers.size > 0;
+          if (!refreshMcp) {
+            refreshMcp = yield* makeCodexMcpRefresh({
+              configuration: client
+                .request("config/read", { cwd: options.cwd, includeLayers: false })
+                .pipe(Effect.map(({ config }) => config)),
+              reload: client.request("config/mcpServer/reload", undefined),
+            }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            // Recover after an unavailable initial config read before using the catalog.
+            if (refreshMcp) yield* refreshMcp(true);
+            else if (explicitRefresh) yield* client.request("config/mcpServer/reload", undefined);
+          } else yield* refreshMcp(explicitRefresh);
+          mcpRefreshRevision = revision;
+          refreshedCredentialRevision = credentialRevision;
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
@@ -2462,17 +2570,10 @@ export const makeCodexSessionRuntime = (
               options.appServerArgs,
               options.mcpCapabilities,
             ),
+            nativeApplicationContext: yield* Ref.get(nativeApplicationContextRef),
+            ...(options.browserEngine ? { browserEngine: options.browserEngine } : {}),
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-                "decode-response-payload",
-                error,
-                { method: "turn/start" },
-              ),
-            ),
-          );
+          const response = yield* client.request("turn/start", params);
           const turnId = TurnId.make(response.turn.id);
           yield* updateSession(sessionRef, (session) => ({
             status: "running",

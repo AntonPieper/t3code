@@ -37,7 +37,9 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -46,8 +48,13 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import { PreviewAutomationBroker } from "../../mcp/PreviewAutomationBroker.ts";
+import { PreviewManager } from "../../preview/Manager.ts";
+import { startCodexBrowser } from "../../preview/codexBrowser.ts";
+import { loadCodexCuaConfiguration } from "../../preview/codexCuaConfiguration.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -2222,6 +2229,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* Effect.service(ServerConfig);
+  const browserBroker = yield* Effect.serviceOption(PreviewAutomationBroker);
+  const path = yield* Path.Path;
+  const browserPreview = yield* Effect.serviceOption(PreviewManager);
+  const browserPlatform = yield* Effect.serviceOption(HostProcessPlatform);
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -2255,9 +2266,41 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const environment = options?.environment ?? process.env;
+        const browserAccess = mcpSession?.capabilities.has("preview") ?? false;
+        const cuaEnabled = environment.T3CODE_CODEX_CUA === "1" && browserAccess;
+        if (
+          cuaEnabled &&
+          (!environment.T3CODE_CODEX_CUA_PLUGIN ||
+            Option.isNone(browserBroker) ||
+            Option.isNone(browserPreview))
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "Native CUA requires T3CODE_CODEX_CUA_PLUGIN pointing to an installed unified-computer-use .mcp.json and a Preview-capable T3 server. Disable T3CODE_CODEX_CUA to use portable Preview.",
+          });
+        }
+        const cuaConfiguration =
+          cuaEnabled && environment.T3CODE_CODEX_CUA_PLUGIN
+            ? yield* loadCodexCuaConfiguration(environment.T3CODE_CODEX_CUA_PLUGIN).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "startSession",
+                      issue: cause.message,
+                    }),
+                ),
+              )
+            : undefined;
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
+          browserEngine: cuaConfiguration ? "cua" : browserAccess ? "preview" : "disabled",
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
@@ -2285,12 +2328,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
                   "-c",
                   'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  ...(cuaConfiguration?.appServerArgs ?? []),
                 ],
                 mcpCapabilities: mcpSession.capabilities,
               }
             : {}),
         };
         const turnTokenUsage = makeCodexTurnTokenUsageState();
+        let releaseBrowser: (turnId?: string) => Effect.Effect<void> = () => Effect.void;
         // Codex reports a usage-limit stop as OpenAI's own sentence, which on a
         // Business workspace blames credits for a window that ran out. The
         // snapshot naming that window arrives in its own notification, before or
@@ -2379,6 +2424,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 EffectCodexSchema.V2TurnCompletedNotification,
                 event.payload,
               );
+              yield* releaseBrowser(completedPayload?.turn.id);
               const turnError =
                 completedPayload?.turn.status === "failed"
                   ? completedPayload.turn.error
@@ -2461,6 +2507,37 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ),
           ),
         );
+
+        if (
+          cuaConfiguration &&
+          mcpSession &&
+          isCodexResumeCursorSchema(started.resumeCursor) &&
+          Option.isSome(browserBroker) &&
+          Option.isSome(browserPreview)
+        ) {
+          const browser = yield* startCodexBrowser({
+            nativeThreadId: started.resumeCursor.threadId,
+            platform: Option.getOrElse(browserPlatform, () => null),
+            session: mcpSession,
+            broker: browserBroker.value,
+            preview: browserPreview.value,
+          }).pipe(
+            Effect.provideService(Scope.Scope, sessionScope),
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail:
+                    "Could not start the selected native CUA Preview backend. Disable the opt-in to select portable Preview.",
+                  cause,
+                }),
+            ),
+          );
+          if (browser) releaseBrowser = browser.release;
+        }
 
         sessions.set(input.threadId, {
           threadId: input.threadId,

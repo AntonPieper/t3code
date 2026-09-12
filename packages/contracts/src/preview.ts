@@ -9,7 +9,14 @@
  * @module Preview
  */
 import { Schema } from "effect";
-import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
+  ThreadId,
+  TurnId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { BrowserProfileId } from "./browserProfile.ts";
 
 export const PREVIEW_URL_MAX_LENGTH = 2_048;
@@ -162,9 +169,19 @@ export const PreviewNavStatus = Schema.Union([
 ]);
 export type PreviewNavStatus = typeof PreviewNavStatus.Type;
 
+export const PreviewEnvironmentPort = Schema.Struct({
+  port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+  protocol: Schema.Literals(["http", "https"]),
+});
+export type PreviewEnvironmentPort = typeof PreviewEnvironmentPort.Type;
+
 export const PreviewSessionSnapshot = Schema.Struct({
   threadId: TrimmedNonEmptyString,
   tabId: PreviewTabId,
+  /** null is unclaimed; absent denotes a server without physical host ownership. */
+  hostingClientId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  /** The URL belongs to this environment; a host recreates its local transport on reconnect. */
+  environmentPort: Schema.optional(Schema.NullOr(PreviewEnvironmentPort)),
   navStatus: PreviewNavStatus,
   canGoBack: Schema.Boolean,
   canGoForward: Schema.Boolean,
@@ -182,6 +199,8 @@ export type PreviewSessionSnapshot = typeof PreviewSessionSnapshot.Type;
 
 export const PreviewOpenInput = Schema.Struct({
   threadId: ThreadId,
+  hostingClientId: Schema.optional(TrimmedNonEmptyString),
+  environmentPort: Schema.optional(PreviewEnvironmentPort),
   /** Omit to create an empty (Idle) tab the user can type into. */
   url: Schema.optional(Url),
   /**
@@ -196,6 +215,13 @@ export const PreviewOpenInput = Schema.Struct({
 });
 export type PreviewOpenInput = typeof PreviewOpenInput.Type;
 
+export const PreviewClaimHostInput = Schema.Struct({
+  threadId: ThreadId,
+  tabId: PreviewTabId,
+  clientId: TrimmedNonEmptyString,
+});
+export type PreviewClaimHostInput = typeof PreviewClaimHostInput.Type;
+
 export const PreviewNavigateInput = Schema.Struct({
   threadId: ThreadId,
   tabId: PreviewTabId,
@@ -207,6 +233,7 @@ export type PreviewNavigateInput = typeof PreviewNavigateInput.Type;
 export const PreviewReportStatusInput = Schema.Struct({
   threadId: ThreadId,
   tabId: PreviewTabId,
+  environmentPort: Schema.optional(Schema.NullOr(PreviewEnvironmentPort)),
   navStatus: PreviewNavStatus,
   canGoBack: Schema.Boolean,
   canGoForward: Schema.Boolean,
@@ -352,3 +379,91 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
 
 export const PreviewError = Schema.Union([PreviewSessionLookupError, PreviewInvalidUrlError]);
 export type PreviewError = typeof PreviewError.Type;
+
+/** A project script run in a terminal owned by the environment. */
+export const PreviewServerInput = Schema.Struct({
+  threadId: ThreadId,
+  scriptId: TrimmedNonEmptyString,
+});
+export type PreviewServerInput = typeof PreviewServerInput.Type;
+export const PreviewServerListInput = Schema.Struct({ threadId: ThreadId });
+export const PreviewServerStatus = Schema.Struct({
+  ...PreviewServerInput.fields,
+  name: TrimmedNonEmptyString,
+  terminalId: TrimmedNonEmptyString,
+  status: Schema.Literals(["starting", "ready", "failed", "stopped"]),
+  url: Schema.NullOr(Url),
+  message: Schema.NullOr(Schema.String),
+  updatedAt: Schema.String,
+});
+export type PreviewServerStatus = typeof PreviewServerStatus.Type;
+export const PreviewServerList = Schema.Array(PreviewServerStatus);
+export class PreviewServerError extends Schema.TaggedError<PreviewServerError>()(
+  "PreviewServerError",
+  {
+    ...PreviewServerInput.fields,
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export const PreviewPortGatewayInput = Schema.Struct({
+  port: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 })),
+  protocol: Schema.optional(Schema.Literals(["http", "https"])),
+});
+export type PreviewPortGatewayInput = typeof PreviewPortGatewayInput.Type;
+export const PreviewPortGatewayGrant = Schema.Struct({
+  relativeUrl: TrimmedNonEmptyString,
+  expiresAt: Schema.Finite,
+});
+export type PreviewPortGatewayGrant = typeof PreviewPortGatewayGrant.Type;
+export class PreviewPortGatewayError extends Schema.TaggedError<PreviewPortGatewayError>()(
+  "PreviewPortGatewayError",
+  {
+    port: Schema.Int,
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+export const PreviewVerificationRun = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  checkpointTurnId: TurnId,
+  status: Schema.Literals(["running", "passed", "failed", "cancelled"]),
+  summary: Schema.String.check(Schema.isMaxLength(4000)),
+  url: Schema.NullOr(Url),
+  evidencePaths: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))).check(
+    Schema.isMaxLength(8),
+  ),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type PreviewVerificationRun = typeof PreviewVerificationRun.Type;
+export const PreviewVerificationState = Schema.Struct({
+  enabled: Schema.Boolean,
+  run: Schema.NullOr(PreviewVerificationRun),
+});
+export type PreviewVerificationState = typeof PreviewVerificationState.Type;
+export const PreviewVerificationInput = Schema.Struct({ threadId: ThreadId });
+export const PreviewVerificationSetInput = Schema.Struct({
+  threadId: ThreadId,
+  enabled: Schema.Boolean,
+});
+export const PreviewVerificationReport = Schema.Struct({
+  runId: TrimmedNonEmptyString,
+  status: Schema.Literals(["passed", "failed"]),
+  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(4000)),
+  url: Schema.NullOr(Url),
+  evidencePaths: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(1024))).check(
+    Schema.isMaxLength(8),
+  ),
+});
+export type PreviewVerificationReport = typeof PreviewVerificationReport.Type;
+export class PreviewVerificationError extends Schema.TaggedError<PreviewVerificationError>()(
+  "PreviewVerificationError",
+  {
+    threadId: ThreadId,
+    message: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}

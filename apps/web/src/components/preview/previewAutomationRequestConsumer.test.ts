@@ -47,12 +47,64 @@ const requestEvent = (
   request: request(requestId, overrides),
 });
 
-const consumerState = (handleRequest: (request: PreviewAutomationRequest) => Promise<unknown>) => ({
+const consumerState = (
+  handleRequest: (request: PreviewAutomationRequest, signal: AbortSignal) => Promise<unknown>,
+) => ({
   connectionAtom: Atom.make<string | null>(null),
   requestHandlerAtom: Atom.make({ handle: handleRequest }),
 });
 
 describe("previewAutomationRequestConsumer", () => {
+  it.each(["cancel", "disconnect", "replacement"] as const)(
+    "aborts physical work on %s",
+    async (reason) => {
+      const requestsAtom = Atom.make(
+        AsyncResult.success<PreviewAutomationStreamEvent, Error>({
+          type: "connected",
+          connectionId,
+        }),
+      );
+      let enter!: (signal: AbortSignal) => void;
+      const entered = new Promise<AbortSignal>((resolve) => {
+        enter = resolve;
+      });
+      let finish!: () => void;
+      const done = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const state = consumerState(async (_request, signal) => {
+        enter(signal);
+        signal.addEventListener("abort", () => finish(), { once: true });
+        return done;
+      });
+      const registry = AtomRegistry.make();
+      const consumer = createPreviewAutomationRequestConsumerAtom({
+        requestsAtom,
+        clientId,
+        environmentId,
+        ...state,
+        respond: async () => {},
+        label: "test:cancellation",
+      });
+      registry.mount(consumer);
+      registry.set(requestsAtom, AsyncResult.success(requestEvent("pending")));
+      const signal = await entered;
+      if (reason === "cancel")
+        registry.set(
+          requestsAtom,
+          AsyncResult.success({ type: "cancel", connectionId, requestId: "pending" }),
+        );
+      else if (reason === "replacement")
+        registry.set(
+          requestsAtom,
+          AsyncResult.success({ type: "connected", connectionId: "replacement" }),
+        );
+      else registry.dispose();
+      await done;
+      expect(signal.aborted).toBe(true);
+      registry.dispose();
+    },
+  );
   it("acknowledges a replacement stream before consuming requests from it", async () => {
     const requestsAtom = Atom.make(
       AsyncResult.success<PreviewAutomationStreamEvent, Error>({
@@ -322,6 +374,21 @@ describe("previewAutomationRequestConsumer", () => {
         selectorLength: 6,
       },
     });
+  });
+
+  it("keeps missing-element failures actionable without exposing target contents", () => {
+    const response = serializePreviewAutomationError(
+      {
+        _tag: "PreviewAutomationTargetNotFoundError",
+        message: "private target contents",
+        selector: "private selector",
+      },
+      { requestId: "missing-target", operation: "click", environmentId, threadId, tabId },
+    );
+    expect(response._tag).toBe("PreviewAutomationTargetNotFoundError");
+    expect(response.message).toContain("could not find the target");
+    expect(response.message).toContain("fresh snapshot");
+    expect(JSON.stringify(response)).not.toContain("private");
   });
 
   it("correlates unexpected failures without exposing cause details", () => {

@@ -1,3 +1,4 @@
+import { requestMcpProviderSessionRefresh } from "./mcp/McpProviderSession.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -116,6 +117,9 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import { PreviewServers } from "./preview/Servers.ts";
+import { PreviewVerification } from "./preview/Verification.ts";
+import { createPortGatewayGrant } from "./preview/PortGateway.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
@@ -538,6 +542,8 @@ const makeWsRpcLayer = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const deviceService = yield* DeviceService.DeviceService;
+      const previewServers = yield* PreviewServers;
+      const previewVerification = yield* PreviewVerification;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerService = yield* ProviderService.ProviderService;
@@ -1812,6 +1818,7 @@ const makeWsRpcLayer = (
                   ? providerRegistry.refreshInstance(input.instanceId)
                   : providerRegistry.refresh();
               if (input.refreshModels) {
+                requestMcpProviderSessionRefresh(input.instanceId);
                 const instances = yield* providerInstances.listInstances;
                 for (const instance of instances) {
                   if (
@@ -2746,6 +2753,48 @@ const makeWsRpcLayer = (
           }),
         [WS_METHODS.previewList]: (input) =>
           observeRpcEffect(WS_METHODS.previewList, previewManager.list(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewClaimHost]: (input) =>
+          observeRpcEffect(WS_METHODS.previewClaimHost, previewManager.claimHost(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewStartServer]: (input) =>
+          observeRpcEffect(WS_METHODS.previewStartServer, previewServers.start(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewVerificationEvents]: (input) =>
+          observeRpcStream(
+            WS_METHODS.previewVerificationEvents,
+            previewVerification.changes(input.threadId),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.previewVerificationSet]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.previewVerificationSet,
+            previewVerification.setEnabled(input.threadId, input.enabled),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.previewVerificationCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.previewVerificationCancel,
+            previewVerification.cancel(input.threadId),
+            { "rpc.aggregate": "preview" },
+          ),
+        [WS_METHODS.previewCreatePortGateway]: (input) =>
+          observeRpcEffect(WS_METHODS.previewCreatePortGateway, createPortGatewayGrant(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewStopServer]: (input) =>
+          observeRpcEffect(WS_METHODS.previewStopServer, previewServers.stop(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewRestartServer]: (input) =>
+          observeRpcEffect(WS_METHODS.previewRestartServer, previewServers.restart(input), {
+            "rpc.aggregate": "preview",
+          }),
+        [WS_METHODS.previewServerEvents]: (input) =>
+          observeRpcStream(WS_METHODS.previewServerEvents, previewServers.changes(input.threadId), {
             "rpc.aggregate": "preview",
           }),
         [WS_METHODS.previewReportStatus]: (input) =>

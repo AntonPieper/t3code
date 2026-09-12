@@ -1,4 +1,5 @@
 import * as NodeVM from "node:vm";
+import type { PreviewBrowserCdpInput } from "@t3tools/contracts";
 import { it as effectIt } from "@effect/vitest";
 import { DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER } from "@t3tools/contracts";
 import type { DesktopPreviewRecordingFrame } from "@t3tools/contracts";
@@ -2598,6 +2599,304 @@ describe("PreviewManager", () => {
         expect(Exit.isFailure(exit)).toBe(true);
         expect(capturePage).toHaveBeenCalledOnce();
         expect(writeFile).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.effect.each([
+    {
+      input: { includeText: true, includeImage: true, save: false, diagnostics: [] },
+      images: 1,
+      text: true,
+      ax: false,
+    },
+    { input: { includeImage: false }, images: 0, text: true, ax: false },
+    { input: { includeText: false }, images: 1, text: false, ax: false },
+    { input: { includeImage: false, save: true }, images: 1, text: true, ax: true },
+    { input: { includeText: false, save: true }, images: 1, text: false, ax: false },
+    { input: { includeImage: false, includeText: false }, images: 0, text: false, ax: false },
+  ])("captures only the requested observation components %#", ({ input, images, text, ax }) =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const toPNG = vi.fn(() => Buffer.from("png"));
+        const resize = vi.fn();
+        const capturePage = vi.fn(async () => ({
+          getSize: () => ({ width: 100, height: 50 }),
+          toPNG,
+          toJPEG: toPNG,
+          resize,
+        }));
+        if (images === 0) capturePage.mockRejectedValue(new Error("Compositor unavailable"));
+        const wc = makeTestPreviewWebContents(capturePage);
+        Object.assign(wc, { isDevToolsOpened: () => false });
+        const sendCommand = vi.fn(async (method: string) =>
+          method === "Runtime.evaluate"
+            ? {
+                result: {
+                  value: {
+                    url: "https://example.com",
+                    title: "Example",
+                    loading: false,
+                    visibleText: "Submit",
+                    interactiveElements: [],
+                  },
+                },
+              }
+            : method === "Accessibility.getFullAXTree"
+              ? { nodes: [{ name: "Submit" }] }
+              : undefined,
+        );
+        Object.assign(wc.debugger, { sendCommand });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+        const snapshot = yield* manager.automationSnapshot("tab_1", input);
+        expect(capturePage).toHaveBeenCalledTimes(images);
+        expect(toPNG).toHaveBeenCalledTimes(images);
+        expect(resize).not.toHaveBeenCalled();
+        expect(
+          sendCommand.mock.calls.filter(([method]) => method === "Runtime.evaluate"),
+        ).toHaveLength(text ? 1 : 0);
+        expect(
+          sendCommand.mock.calls.filter(([method]) => method === "Accessibility.getFullAXTree"),
+        ).toHaveLength(ax ? 1 : 0);
+        expect(snapshot.screenshot === undefined).toBe(images === 0);
+        expect(snapshot.visibleText === undefined).toBe(!text);
+        expect(snapshot).not.toHaveProperty("consoleEntries");
+        expect(snapshot).not.toHaveProperty("networkEntries");
+        expect(snapshot).not.toHaveProperty("actionTimeline");
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "cancels the physical evaluation and drains its request before acknowledging stop",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const entered = Promise.withResolvers<void>();
+          const wc = makeTestPreviewWebContents(vi.fn());
+          Object.assign(wc, { isDevToolsOpened: () => false });
+          const sendCommand = vi.fn(async (method: string) => {
+            if (method === "Runtime.evaluate") {
+              entered.resolve();
+              return await new Promise(() => {});
+            }
+            return {};
+          });
+          Object.assign(wc.debugger, { sendCommand });
+          fromId.mockReturnValue(wc);
+          yield* manager.createTab("tab_1");
+          yield* manager.registerWebview("tab_1", 42);
+          const running = yield* Effect.exit(
+            manager.automationRun({
+              requestId: "pending",
+              tabId: "tab_1",
+              command: { operation: "evaluate", input: { expression: "new Promise(() => {})" } },
+            }),
+          ).pipe(Effect.forkChild);
+          yield* Effect.promise(() => entered.promise);
+          yield* manager.automationCancel("pending");
+          expect(Exit.isFailure(yield* Fiber.join(running))).toBe(true);
+          expect(sendCommand).toHaveBeenCalledWith("Runtime.terminateExecution");
+          yield* manager.automationCancel("pending");
+        }),
+      ),
+  );
+
+  effectIt.effect("drains explicit native detach even when its request is cancelled", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const wc = makeTestPreviewWebContents(vi.fn());
+        Object.assign(wc, { isDevToolsOpened: () => false });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_detach_cancel");
+        yield* manager.registerWebview("tab_detach_cancel", 42);
+        const entered = Promise.withResolvers<void>();
+        const proceed = Promise.withResolvers<object>();
+        const sendCommand = vi.fn(async (method: string) => {
+          if (method === "Runtime.terminateExecution") {
+            entered.resolve();
+            return proceed.promise;
+          }
+          return {};
+        });
+        Object.assign(wc.debugger, { sendCommand });
+        yield* manager.automationRun({
+          requestId: "attach-drain",
+          tabId: "tab_detach_cancel",
+          command: { operation: "browserCdp", input: { kind: "attach", leaseId: "native" } },
+        });
+        const detaching = yield* Effect.exit(
+          manager.automationRun({
+            requestId: "detach-drain",
+            tabId: "tab_detach_cancel",
+            command: { operation: "browserCdp", input: { kind: "detach", leaseId: "native" } },
+          }),
+        ).pipe(Effect.forkChild);
+        yield* Effect.promise(() => entered.promise);
+        const cancelling = yield* manager.automationCancel("detach-drain").pipe(Effect.forkChild);
+        proceed.resolve({});
+        yield* Fiber.join(cancelling);
+        yield* Fiber.join(detaching);
+        expect(sendCommand.mock.calls.map(([method]) => method)).toEqual(
+          expect.arrayContaining([
+            "Page.stopLoading",
+            "Fetch.disable",
+            "Target.setAutoAttach",
+            "Runtime.enable",
+          ]),
+        );
+      }),
+    ),
+  );
+
+  effectIt.effect("allows native interception replies to complete an in-flight navigation", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const wc = makeTestPreviewWebContents(vi.fn());
+        Object.assign(wc, { isDevToolsOpened: () => false });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_interception");
+        yield* manager.registerWebview("tab_interception", 42);
+        const entered = Promise.withResolvers<void>();
+        const continued = Promise.withResolvers<object>();
+        const sendCommand = vi.fn(async (method: string) => {
+          if (method === "Page.navigate") {
+            entered.resolve();
+            return continued.promise;
+          }
+          if (method === "Fetch.continueResponse") continued.resolve({ frameId: "fixture" });
+          return {};
+        });
+        Object.assign(wc.debugger, { sendCommand });
+        let sequence = 0;
+        const cdp = (input: PreviewBrowserCdpInput) =>
+          manager.automationRun({
+            requestId: `interception-${++sequence}`,
+            tabId: "tab_interception",
+            command: { operation: "browserCdp", input },
+          });
+        yield* cdp({ kind: "attach", leaseId: "native" });
+        const navigation = yield* cdp({
+          kind: "send",
+          leaseId: "native",
+          method: "Page.navigate",
+        }).pipe(Effect.forkChild);
+        yield* Effect.promise(() => entered.promise);
+        yield* cdp({
+          kind: "send",
+          leaseId: "native",
+          method: "Fetch.continueResponse",
+          commandParams: { requestId: "paused" },
+        });
+        expect(yield* Fiber.join(navigation)).toEqual({ frameId: "fixture" });
+        yield* cdp({ kind: "detach", leaseId: "native" });
+        const stale = yield* Effect.exit(
+          cdp({ kind: "send", leaseId: "native", method: "Fetch.continueResponse" }),
+        );
+        expect(Exit.isFailure(stale)).toBe(true);
+        expect(
+          sendCommand.mock.calls.filter(([method]) => method === "Fetch.continueResponse"),
+        ).toHaveLength(1);
+      }),
+    ),
+  );
+
+  effectIt.effect("drains native evaluation and navigation before cancelling their leases", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const wc = makeTestPreviewWebContents(vi.fn());
+        Object.assign(wc, { isDevToolsOpened: () => false });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_native_cancel");
+        yield* manager.registerWebview("tab_native_cancel", 42);
+        for (const [method, cleanup] of [
+          ["Runtime.evaluate", "Runtime.terminateExecution"],
+          ["Page.navigate", "Page.stopLoading"],
+        ] as const) {
+          const entered = Promise.withResolvers<void>();
+          const cleaned = Promise.withResolvers<void>();
+          const sendCommand = vi.fn(async (command: string) => {
+            if (command === method) {
+              entered.resolve();
+              return await new Promise(() => {});
+            }
+            if (command === cleanup) cleaned.resolve();
+            return {};
+          });
+          Object.assign(wc.debugger, { sendCommand });
+          yield* manager.automationRun({
+            requestId: `attach-${method}`,
+            tabId: "tab_native_cancel",
+            command: { operation: "browserCdp", input: { kind: "attach", leaseId: method } },
+          });
+          const running = yield* Effect.exit(
+            manager.automationRun({
+              requestId: method,
+              tabId: "tab_native_cancel",
+              command: {
+                operation: "browserCdp",
+                input: { kind: "send", leaseId: method, method },
+              },
+            }),
+          ).pipe(Effect.forkChild);
+          yield* Effect.promise(() => entered.promise);
+          yield* manager.automationCancel(method);
+          yield* Effect.promise(() => cleaned.promise);
+          expect(Exit.isFailure(yield* Fiber.join(running))).toBe(true);
+          expect(sendCommand).toHaveBeenCalledWith(cleanup, {}, undefined);
+        }
+      }),
+    ),
+  );
+
+  effectIt.effect("native input respects human takeover and stale lease cleanup", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const wc = makeTestPreviewWebContents(vi.fn());
+        let humanInput: ((_event: unknown, signal: unknown) => void) | undefined;
+        const sendCommand = vi.fn(async (_method: string) => ({}));
+        Object.assign(wc, {
+          isDevToolsOpened: () => false,
+          ipc: {
+            on: (channel: string, listener: typeof humanInput) => {
+              if (channel === "preview:human-input") humanInput = listener;
+            },
+            off: vi.fn(),
+          },
+        });
+        Object.assign(wc.debugger, { sendCommand });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+        let sequence = 0;
+        const cdp = (input: import("@t3tools/contracts").PreviewBrowserCdpInput) =>
+          manager.automationRun({
+            requestId: `native-${++sequence}`,
+            tabId: "tab_1",
+            command: { operation: "browserCdp", input },
+          });
+        yield* cdp({ kind: "attach", leaseId: "first" });
+        humanInput?.({}, { kind: "pointer", x: 50, y: 60, button: 0 });
+        yield* TestClock.adjust(0);
+        const stale = yield* Effect.exit(
+          cdp({
+            kind: "send",
+            leaseId: "first",
+            method: "Input.insertText",
+            commandParams: { text: "after human" },
+          }),
+        );
+        expect(Exit.isFailure(stale)).toBe(true);
+        expect(sendCommand.mock.calls.some(([method]) => method === "Input.insertText")).toBe(
+          false,
+        );
+        yield* cdp({ kind: "detach", leaseId: "first" });
+        yield* cdp({ kind: "attach", leaseId: "second" });
+        yield* cdp({ kind: "detach", leaseId: "first" });
+        yield* cdp({ kind: "send", leaseId: "second", method: "Runtime.enable" });
+        yield* cdp({ kind: "detach", leaseId: "second" });
       }),
     ),
   );

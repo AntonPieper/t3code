@@ -7,6 +7,7 @@ export interface McpProviderSessionConfig {
   readonly providerInstanceId: ProviderInstanceId;
   readonly endpoint: string;
   readonly authorizationHeader: string;
+  readonly refreshRevision?: number;
   /** Capabilities the credential grants ("preview", "device"). */
   readonly capabilities: ReadonlySet<string>;
   /**
@@ -50,4 +51,16 @@ export function clearMcpProviderSession(threadId: ThreadId): void {
 
 export function clearAllMcpProviderSessions(): void {
   sessionsByThread.clear();
+}
+
+/** Explicit Settings refresh is consumed by each active native session before its next turn. */
+export function requestMcpProviderSessionRefresh(instanceId?: ProviderInstanceId): void {
+  for (const [threadId, config] of sessionsByThread) {
+    if (instanceId === undefined || config.providerInstanceId === instanceId) {
+      sessionsByThread.set(threadId, {
+        ...config,
+        refreshRevision: (config.refreshRevision ?? 0) + 1,
+      });
+    }
+  }
 }

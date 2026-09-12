@@ -13,6 +13,7 @@ import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.t
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildTurnStartParams,
+  supportsCodexApplicationContext,
   describeMcpElicitation,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
@@ -22,6 +23,7 @@ import {
   rollbackCodexThread,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
+const encodeTurnStart = Schema.encodeSync(CodexRpc.CLIENT_REQUEST_PARAMS["turn/start"]);
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("Codex thread history", () => {
@@ -153,7 +155,92 @@ function makeThreadOpenResponse(
   } as unknown as CodexRpc.ClientRequestResponsesByMethod["thread/start"];
 }
 
+describe("native application context", () => {
+  it.effect("keeps legacy collaboration guidance on the selected native browser engine", () =>
+    Effect.gen(function* () {
+      const request = yield* buildTurnStartParams({
+        threadId: "legacy-thread",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        nativeApplicationContext: false,
+        browserEngine: "cua",
+        browserToolsAvailable: true,
+      });
+      NodeAssert.match(
+        request.collaborationMode!.settings.developer_instructions!,
+        /cua_repl.*iab/,
+      );
+      NodeAssert.doesNotMatch(
+        request.collaborationMode!.settings.developer_instructions!,
+        /call preview_open|Inspect with preview_snapshot/,
+      );
+      NodeAssert.equal(request.additionalContext, undefined);
+    }),
+  );
+
+  it("uses tested runtime versions and leaves unknown/prerelease builds on the compatibility path", () => {
+    for (const userAgent of ["codex/0.154.0 (macos)", "t3/0.155.1", "codex/1.0.0"])
+      NodeAssert.equal(supportsCodexApplicationContext(userAgent), true);
+    for (const userAgent of ["codex/0.153.0", "unknown", "codex/0.154.0-alpha.1"])
+      NodeAssert.equal(supportsCodexApplicationContext(userAgent), false);
+  });
+
+  it.effect(
+    "preserves native modes and explicitly supersedes browser guidance across access and engine changes",
+    () =>
+      Effect.gen(function* () {
+        for (const interactionMode of ["default", "plan"] as const) {
+          const requests = yield* Effect.forEach(
+            ["preview", "preview", "disabled", "cua", "preview"] as const,
+            (browserEngine) =>
+              buildTurnStartParams({
+                threadId: "native-thread",
+                runtimeMode: "full-access",
+                interactionMode,
+                nativeApplicationContext: true,
+                browserEngine,
+              }),
+          );
+          NodeAssert.deepEqual(requests[0]?.additionalContext, requests[1]?.additionalContext);
+          for (const request of requests) {
+            NodeAssert.equal(request.collaborationMode?.settings.developer_instructions, null);
+            NodeAssert.deepEqual(encodeTurnStart(request), request);
+            NodeAssert.equal(request.additionalContext?.["t3.application"]?.kind, "application");
+          }
+          NodeAssert.match(
+            requests[2]!.additionalContext!["t3.application"]!.value,
+            /access is disabled.*superseded/,
+          );
+          NodeAssert.match(
+            requests[3]!.additionalContext!["t3.application"]!.value,
+            /cua_repl.*iab/,
+          );
+          NodeAssert.match(
+            requests[4]!.additionalContext!["t3.application"]!.value,
+            /Previous CUA guidance is superseded/,
+          );
+        }
+      }),
+  );
+});
+
 describe("buildTurnStartParams", () => {
+  it.effect("keeps device guidance when the Preview capability is disabled", () =>
+    Effect.gen(function* () {
+      const request = yield* buildTurnStartParams({
+        threadId: "device-only",
+        runtimeMode: "full-access",
+        nativeApplicationContext: true,
+        browserEngine: "cua",
+        browserToolsAvailable: { browser: false, device: true },
+      });
+      const guidance = request.additionalContext?.["t3.application"]?.value ?? "";
+      NodeAssert.match(guidance, /Preview access is disabled/);
+      NodeAssert.match(guidance, /agent-device snapshot/);
+      NodeAssert.doesNotMatch(guidance, /Use the installed cua_repl/);
+    }),
+  );
+
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(
@@ -270,21 +357,21 @@ describe("buildTurnStartParams", () => {
     });
   });
 
-  it("reports the same fallback model and effort in settings and instructions", () => {
-    const params = Effect.runSync(
-      buildTurnStartParams({
+  it.effect("reports the same fallback model and effort in settings and instructions", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
         runtimeMode: "full-access",
         prompt: "Go",
         interactionMode: "default",
-      }),
-    );
+      });
 
-    const settings = params.collaborationMode?.settings;
-    NodeAssert.equal(settings?.model, DEFAULT_MODEL);
-    NodeAssert.equal(settings?.reasoning_effort, "medium");
-    NodeAssert.ok(settings?.developer_instructions?.includes(`as ${DEFAULT_MODEL} with medium`));
-  });
+      const settings = params.collaborationMode?.settings;
+      NodeAssert.equal(settings?.model, DEFAULT_MODEL);
+      NodeAssert.equal(settings?.reasoning_effort, "medium");
+      NodeAssert.ok(settings?.developer_instructions?.includes(`as ${DEFAULT_MODEL} with medium`));
+    }),
+  );
 
   it.effect("routes approvals to the auto reviewer in auto mode", () =>
     Effect.gen(function* () {
@@ -311,30 +398,30 @@ describe("buildTurnStartParams", () => {
     }),
   );
 
-  it("omits collaboration mode when interaction mode is absent", () => {
-    const params = Effect.runSync(
-      buildTurnStartParams({
+  it.effect("omits collaboration mode when interaction mode is absent", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
         runtimeMode: "approval-required",
         prompt: "Review",
-      }),
-    );
+      });
 
-    NodeAssert.deepStrictEqual(params, {
-      threadId: "provider-thread-1",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "readOnly",
-      },
-      input: [
-        {
-          type: "text",
-          text: "Review",
+      NodeAssert.deepStrictEqual(params, {
+        threadId: "provider-thread-1",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+        sandboxPolicy: {
+          type: "readOnly",
         },
-      ],
-    });
-  });
+        input: [
+          {
+            type: "text",
+            text: "Review",
+          },
+        ],
+      });
+    }),
+  );
 });
 
 describe("Codex MCP elicitation approvals", () => {
@@ -546,7 +633,7 @@ describe("buildCodexDeveloperInstructions", () => {
       reasoningEffort: "high",
     });
 
-    NodeAssert.match(instructions, /^<collaboration_mode># Collaboration Mode: Default/);
+    NodeAssert.match(instructions, /^Default mode:/);
     NodeAssert.match(instructions, /T3 Code/);
     NodeAssert.match(instructions, /Codex harness/);
     NodeAssert.match(instructions, /as gpt-5\.3-codex with high reasoning effort/);
@@ -571,7 +658,7 @@ describe("buildCodexDeveloperInstructions", () => {
       reasoningEffort: "medium",
     });
 
-    NodeAssert.match(instructions, /^<collaboration_mode># Plan Mode/);
+    NodeAssert.match(instructions, /^Plan mode:/);
     NodeAssert.match(instructions, /as gpt-5\.3-codex with medium reasoning effort/);
   });
 
@@ -606,9 +693,9 @@ describe("T3 browser developer instructions", () => {
     for (const mode of ["default", "plan"] as const) {
       const instructions = buildCodexDeveloperInstructions(mode, runtime, true);
       NodeAssert.match(instructions, /t3-code/);
-      NodeAssert.match(instructions, /preview_status/);
+      NodeAssert.doesNotMatch(instructions, /first call `preview_status`/);
       NodeAssert.match(instructions, /preview_open/);
-      NodeAssert.match(instructions, /Do not switch to global browser skills/);
+      NodeAssert.match(instructions, /known URL/);
     }
   });
 
@@ -621,9 +708,8 @@ describe("T3 browser developer instructions", () => {
       // Steering away from other browser automation must go with the tools;
       // keeping it would leave the model talked out of its only option.
       NodeAssert.doesNotMatch(instructions, /Do not switch to global browser skills/);
-      // The rest of the collaboration mode is untouched.
-      NodeAssert.match(instructions, /<collaboration_mode>/);
-      NodeAssert.match(instructions, /<\/collaboration_mode>/);
+      NodeAssert.match(instructions, /access is disabled/);
+      NodeAssert.match(instructions, /Previous T3 browser guidance is superseded/);
     }
   });
 

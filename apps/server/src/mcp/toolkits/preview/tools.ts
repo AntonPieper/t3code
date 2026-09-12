@@ -4,6 +4,8 @@ import {
   PreviewAutomationError,
   PreviewAutomationEvaluateInput,
   PreviewAutomationNavigateInput,
+  PreviewAutomationResolveUrlInput,
+  PreviewUrlResolution,
   PreviewAutomationOpenInput,
   PreviewAutomationPressInput,
   PreviewAutomationRecordingArtifact,
@@ -14,10 +16,15 @@ import {
   PreviewAutomationSetColorSchemeInput,
   PreviewAutomationSetColorSchemeResult,
   PreviewAutomationSnapshot,
+  PreviewAutomationSnapshotInput,
   PreviewAutomationStatus,
   PreviewAutomationTabTargetInput,
   PreviewAutomationTypeInput,
   PreviewAutomationWaitForInput,
+  PreviewServerError,
+  PreviewServerList,
+  PreviewVerificationReport,
+  PreviewVerificationError,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
@@ -26,6 +33,10 @@ import { Tool, Toolkit } from "effect/unstable/ai";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as ServerConfig from "../../../config.ts";
+import { PreviewVerification } from "../../../preview/Verification.ts";
+import { ProjectionSnapshotQuery } from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
+import { PreviewServers } from "../../../preview/Servers.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -87,6 +98,17 @@ const PreviewNavigateTool = safeBrowserTool(
   }).annotate(Tool.Title, "Navigate browser preview"),
 );
 
+const PreviewResolveUrlTool = safeBrowserTool(
+  Tool.make("preview_resolve_url", {
+    description:
+      "Resolve an environment-port target for an existing T3 Preview tab without navigating. Native CUA: create or reuse an iab tab, call this with its tabId and {target:{kind:'environment-port',port:5173}}, then use resolvedUrl with that same tab's goto. The returned desktop URL is scoped to that tab; do not share it with another client.",
+    parameters: PreviewAutomationResolveUrlInput,
+    success: PreviewUrlResolution,
+    failure: PreviewAutomationError,
+    dependencies,
+  }),
+);
+
 const PreviewResizeTool = safeBrowserTool(
   Tool.make("preview_resize", {
     description:
@@ -119,22 +141,8 @@ const PreviewSetAppearanceTool = safeBrowserTool(
 export const PreviewSnapshotTool = readonlyBrowserTool(
   Tool.make("preview_snapshot", {
     description:
-      "Inspect a page before interacting. Pass tabId to inspect a specific tab; omit it to use this agent session's current tab. Returns page state, semantic elements, diagnostics, action history, and a PNG screenshot. Set includeImage=false for text-only output with the same page metadata. Set save=true to also write the PNG to disk and get screenshotPath back; embed that path in your reply as ![alt](screenshotPath) so the user sees it. This is the only way to show the user a screenshot; the image in the tool result is not saved anywhere.",
-    parameters: Schema.Struct({
-      ...PreviewAutomationTabTargetInput.fields,
-      includeImage: Schema.optional(
-        Schema.Boolean.annotate({
-          description:
-            "Include the PNG image in the tool response. Defaults to true. Set false for text-only output.",
-        }),
-      ),
-      save: Schema.optional(
-        Schema.Boolean.annotate({
-          description:
-            "Write the screenshot PNG to disk and return its absolute path as screenshotPath. Defaults to false.",
-        }),
-      ),
-    }),
+      "Inspect the current page before interacting, or pass tabId for another tab. Returns bounded page state, actionable elements and a PNG. includeImage=false skips image work unless saving; includeText=false skips semantic extraction. Request diagnostics only when needed. save=true returns screenshotPath and evidencePath for full requested evidence; embed ![alt](screenshotPath) to show the user the saved image.",
+    parameters: PreviewAutomationSnapshotInput,
     success: PreviewAutomationSnapshot,
     failure: PreviewAutomationError,
     dependencies,
@@ -241,10 +249,65 @@ const PreviewRecordingStopTool = safeBrowserTool(
   }).annotate(Tool.Title, "Stop browser recording"),
 );
 
+const PreviewServersTool = readonlyBrowserTool(
+  Tool.make("preview_servers", {
+    description:
+      "List configured script IDs and this thread's managed preview servers, readiness, owned terminal IDs and failures. Servers run existing named project scripts.",
+    parameters: Schema.Struct({
+      scriptId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
+    }),
+    success: Schema.Struct({
+      servers: PreviewServerList,
+      configuredScripts: Schema.Array(
+        Schema.Struct({
+          scriptId: Schema.String,
+          name: Schema.String,
+          previewUrl: Schema.NullOr(Schema.String),
+        }),
+      ),
+    }),
+    failure: Schema.Union([PreviewServerError, PreviewAutomationError]),
+    dependencies: [
+      McpInvocationContext.McpInvocationContext,
+      PreviewServers,
+      ProjectionSnapshotQuery,
+      ServerSettingsService,
+    ],
+  }),
+);
+const PreviewServerControlTool = browserTool(
+  Tool.make("preview_server_control", {
+    description:
+      "Start, stop or restart an existing project script as a named preview server in this thread. Starting an active server reuses it. Read preview_servers for readiness; a conflicting port is never stopped.",
+    parameters: Schema.Struct({
+      scriptId: Schema.String.check(Schema.isNonEmpty()),
+      action: Schema.Literals(["start", "stop", "restart"]),
+    }),
+    success: Schema.Struct({ servers: PreviewServerList }),
+    failure: Schema.Union([PreviewServerError, PreviewAutomationError]),
+    dependencies: [McpInvocationContext.McpInvocationContext, PreviewServers],
+  }),
+);
+
+const PreviewVerificationReportTool = safeBrowserTool(
+  Tool.make("preview_verification_report", {
+    description:
+      "Report the current bounded verification pass. Use only the runId from its automation message. Passed requires an HTTP(S) page URL and existing absolute evidencePaths (images, video, JSON or text, at most 20 MB each). Report failed when the page or host is unavailable. The result is final only after this turn completes.",
+    parameters: PreviewVerificationReport,
+    success: PreviewActionResult,
+    failure: Schema.Union([PreviewVerificationError, PreviewAutomationError]),
+    dependencies: [McpInvocationContext.McpInvocationContext, PreviewVerification],
+  }),
+);
+
 export const PreviewToolkit = Toolkit.make(
+  PreviewVerificationReportTool,
+  PreviewServersTool,
+  PreviewServerControlTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewResolveUrlTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewSnapshotTool,
@@ -259,9 +322,13 @@ export const PreviewToolkit = Toolkit.make(
 );
 
 export const PreviewStandardToolkit = Toolkit.make(
+  PreviewVerificationReportTool,
+  PreviewServersTool,
+  PreviewServerControlTool,
   PreviewStatusTool,
   PreviewOpenTool,
   PreviewNavigateTool,
+  PreviewResolveUrlTool,
   PreviewResizeTool,
   PreviewSetAppearanceTool,
   PreviewClickTool,

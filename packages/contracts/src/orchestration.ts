@@ -1205,10 +1205,21 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+/** Authorship of a submitted message; native providers keep their own internal peer deliveries. */
+export const MessageOrigin = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("human") }),
+  Schema.Struct({ kind: Schema.Literal("automation") }),
+  Schema.Struct({ kind: Schema.Literal("peer"), from: TrimmedNonEmptyString }),
+]);
+export type MessageOrigin = typeof MessageOrigin.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
+  /** An automatic follow-up must not steer newer work. Internal commands only. */
+  expectedCompletedTurnId: Schema.optional(TurnId),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
+  messageOrigin: Schema.optional(MessageOrigin),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -1231,6 +1242,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
+  messageOrigin: Schema.optional(MessageOrigin),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -1248,6 +1260,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
 });
 
 const ThreadTurnInterruptCommand = Schema.Struct({
+  expectedUserMessageAt: Schema.optional(IsoDateTime),
   type: Schema.Literal("thread.turn.interrupt"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1743,6 +1756,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  messageOrigin: Schema.optional(MessageOrigin),
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
@@ -1755,6 +1769,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
+  expectedUserMessageAt: Schema.optional(IsoDateTime),
   threadId: ThreadId,
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,

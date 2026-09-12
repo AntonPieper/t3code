@@ -19,6 +19,9 @@ import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { PreviewVerification } from "../preview/Verification.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+import { PreviewServers } from "../preview/Servers.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -46,6 +49,22 @@ const client = McpSchema.McpServerClient.of({
   getClient: Effect.die("unused"),
 });
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
+  Layer.provide(
+    Layer.mock(ProjectionSnapshotQuery)({
+      getThreadShellById: () => Effect.succeed(Option.none()),
+    }),
+  ),
+  Layer.provide(ServerSettingsService.layerTest()),
+  Layer.provide(Layer.mock(PreviewVerification)({ report: () => Effect.void })),
+  Layer.provide(
+    Layer.succeed(PreviewServers, {
+      start: () => Effect.die("unused"),
+      stop: () => Effect.die("unused"),
+      restart: () => Effect.die("unused"),
+      list: () => Effect.succeed([]),
+      changes: () => Stream.empty,
+    }),
+  ),
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
@@ -91,6 +110,7 @@ const serveSnapshots = (clientId: string, result: unknown) =>
     const events = yield* broker.connect({ clientId, environmentId });
     yield* Stream.runForEach(events, (event) => {
       if (event.type === "connected") return Deferred.succeed(connected, undefined);
+      if (event.type !== "request") return Effect.void;
       inputs.push(event.request.input);
       return broker.respond({
         clientId,
@@ -139,7 +159,7 @@ it.effect.each([{}, { includeImage: false }])(
           environmentId,
         });
         yield* Stream.runForEach(events, (event) =>
-          event.type === "connected"
+          event.type !== "request"
             ? Effect.void
             : broker.respond({
                 clientId: "mcp-failure-client",
@@ -163,16 +183,19 @@ it.effect.each([{}, { includeImage: false }])(
           );
 
         expect(snapshot.isError).toBe(true);
-        expect(snapshot.content).toEqual([
-          { type: "text", text: "Preview snapshot failed: PreviewAutomationExecutionError." },
-        ]);
-        expect(snapshot.structuredContent).toEqual({
+        const text = snapshot.content[0];
+        expect(text?.type === "text" ? decodeJsonText(text.text) : undefined).toEqual(
+          snapshot.structuredContent,
+        );
+        expect(snapshot.structuredContent).toMatchObject({
           error: {
             _tag: "PreviewAutomationExecutionError",
             operation: "snapshot",
             failureCount: 1,
+            message: expect.stringContaining("failed on client"),
           },
         });
+        expect(text?.type === "text" ? text.text : "").not.toContain("sensitive browser output");
       }),
     ).pipe(Effect.provide(TestLayer)),
 );
@@ -215,13 +238,20 @@ it.effect.each([
       const events = yield* broker.connect({ clientId: "mcp-image-option-client", environmentId });
       yield* Stream.runForEach(events, (event) => {
         if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        if (event.type !== "request") return Effect.void;
         requests += 1;
         expect(event.request).toMatchObject({
           operation: "snapshot",
           tabId: alternateTabId,
           threadId,
         });
-        expect(event.request.input).toEqual({});
+        expect(event.request.input).toEqual({
+          includeText: true,
+          includeImage: true,
+          save: false,
+          diagnostics: [],
+          ...(requests === 7 ? {} : input),
+        });
         return broker.respond({
           clientId: "mcp-image-option-client",
           connectionId: event.connectionId,
@@ -246,21 +276,20 @@ it.effect.each([
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.provideService(McpSchema.McpServerClient, client),
           );
-        const metadata = { ...page, title: `Snapshot ${call}`, screenshot };
-        const { accessibilityTree: _tree, ...boundedMetadata } = metadata;
         expect(snapshot.isError).toBe(false);
-        expect(snapshot.structuredContent).toEqual(metadata);
-        const [identity, text, ...rest] = snapshot.content;
-        expect(identity?.type === "text" ? decodeJsonText(identity.text) : null).toEqual({
+        const [text, ...rest] = snapshot.content;
+        const observation = text?.type === "text" ? decodeJsonText(text.text) : null;
+        expect(observation).toMatchObject({
           url: page.url,
+          loading: false,
+          title: `Snapshot ${call}`,
+          interactiveElements: page.interactiveElements,
         });
-        expect(text?.type === "text" ? decodeJsonText(text.text) : null).toEqual(boundedMetadata);
-        expect(rest).toEqual([
-          {
-            type: "text",
-            text: "Snapshot text was bounded. Omitted: accessibilityTree (use interactiveElements locators or preview_evaluate).",
-          },
-          ...(images
+        expect(observation).not.toHaveProperty("accessibilityTree");
+        expect(observation).not.toHaveProperty("actionTimeline");
+        expect(snapshot.structuredContent).toEqual(images ? undefined : observation);
+        expect(rest).toEqual(
+          images
             ? [
                 {
                   type: "image",
@@ -268,8 +297,8 @@ it.effect.each([
                   data: new Uint8Array(Buffer.from(png, "base64")),
                 },
               ]
-            : []),
-        ]);
+            : [],
+        );
       }
 
       // Output selection belongs to this call, not the MCP session's history.
@@ -282,13 +311,8 @@ it.effect.each([
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      expect(nextDefault.content.map((content) => content.type)).toEqual([
-        "text",
-        "text",
-        "text",
-        "image",
-      ]);
-      expect(nextDefault.structuredContent).toEqual({ ...page, title: "Snapshot 7", screenshot });
+      expect(nextDefault.content.map((content) => content.type)).toEqual(["text", "image"]);
+      expect(nextDefault.structuredContent).toBeUndefined();
       expect(requests).toBe(7);
     }),
   ).pipe(Effect.provide(TestLayer)),
@@ -308,12 +332,50 @@ it.effect("rejects non-boolean snapshot image options before selecting a browser
           Effect.provideService(McpSchema.McpServerClient, client),
         );
       expect(result.isError).toBe(true);
-      expect(result.content).toEqual([{ type: "text", text: "Preview snapshot failed: AiError." }]);
-      expect(result.structuredContent).toEqual({
-        error: { _tag: "AiError", operation: "snapshot", failureCount: 1 },
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          _tag: "AiError",
+          operation: "snapshot",
+          failureCount: 1,
+          message: expect.stringContaining("includeImage"),
+        },
       });
+      const text = result.content[0];
+      expect(text?.type === "text" ? decodeJsonText(text.text) : undefined).toEqual(
+        result.structuredContent,
+      );
     }
   }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("accepts a selective host response without a screenshot or legacy collectors", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const inputs = yield* serveSnapshots("selective-host", {
+        url: snapshotResult.url,
+        title: "Text only",
+        loading: false,
+        visibleText: "Ready",
+        interactiveElements: [],
+      });
+      const result = yield* callSnapshot({ includeImage: false });
+      expect(result.isError).toBe(false);
+      expect(result.content.map((block) => block.type)).toEqual(["text"]);
+      expect(result.structuredContent).toMatchObject({ visibleText: "Ready" });
+      expect(result.structuredContent).not.toHaveProperty("screenshot");
+      expect(inputs).toEqual([
+        { includeText: true, includeImage: false, save: false, diagnostics: [] },
+      ]);
+      const missing = yield* callSnapshot({ includeImage: true });
+      expect(missing.isError).toBe(true);
+      expect(missing.structuredContent).toMatchObject({
+        error: {
+          _tag: "PreviewSnapshotComponentError",
+          message: expect.stringContaining("Reconnect or update"),
+        },
+      });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
 );
 
 it.effect("saves the snapshot PNG on request and reports its path", () =>
@@ -327,9 +389,15 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
       const snapshot = yield* callSnapshot({ save: true });
 
       expect(snapshot.isError).toBe(false);
-      // The browser never receives the server-only `save` flag.
-      expect(inputs).toEqual([{}]);
-      const structured = snapshot.structuredContent as { readonly screenshotPath?: string };
+      // Saving requires full capture on the host as well as artifact writes on the environment.
+      expect(inputs).toEqual([
+        { includeText: true, includeImage: true, save: true, diagnostics: [] },
+      ]);
+      const content = snapshot.content[0];
+      const structured = (content?.type === "text" ? decodeJsonText(content.text) : {}) as {
+        readonly screenshotPath?: string;
+        readonly evidencePath: string;
+      };
       const screenshotPath = structured.screenshotPath;
       expect(typeof screenshotPath).toBe("string");
       expect(path.dirname(screenshotPath!)).toBe(config.browserArtifactsDir);
@@ -337,11 +405,16 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
         /^browser-screenshot-example-test-[0-9a-z]+-[0-9a-f]{8}\.png$/,
       );
       expect(Buffer.from(yield* fileSystem.readFile(screenshotPath!)).toString()).toBe("png");
-      const [, text] = snapshot.content;
+      expect(
+        decodeJsonText(yield* fileSystem.readFileString(structured.evidencePath)),
+      ).toMatchObject({ accessibilityTree: snapshotResult.accessibilityTree, screenshotPath });
+      const text = snapshot.content.find((content) => content.type === "text");
       expect(text?.type === "text" ? text.text : "").toContain(screenshotPath);
 
       const unsaved = yield* callSnapshot({});
-      expect(unsaved.structuredContent).not.toHaveProperty("screenshotPath");
+      expect(
+        unsaved.content[0]?.type === "text" ? decodeJsonText(unsaved.content[0].text) : {},
+      ).not.toHaveProperty("screenshotPath");
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -358,12 +431,17 @@ it.effect("reports a tagged error when the screenshot cannot be saved", () =>
       const snapshot = yield* callSnapshot({ save: true });
 
       expect(snapshot.isError).toBe(true);
-      expect(snapshot.content).toEqual([
-        { type: "text", text: "Preview snapshot failed: PreviewScreenshotSaveError." },
-      ]);
-      expect(snapshot.structuredContent).toEqual({
-        error: { _tag: "PreviewScreenshotSaveError", operation: "snapshot", failureCount: 1 },
+      expect(snapshot.structuredContent).toMatchObject({
+        error: {
+          _tag: "PreviewScreenshotSaveError",
+          operation: "snapshot",
+          message: expect.stringContaining("Could not save preview screenshot"),
+        },
       });
+      const text = snapshot.content[0];
+      expect(text?.type === "text" ? decodeJsonText(text.text) : undefined).toEqual(
+        snapshot.structuredContent,
+      );
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -434,13 +512,13 @@ it.effect("keeps the snapshot text under the agent's output ceiling", () =>
       };
       yield* serveSnapshots("mcp-bounded-client", oversized);
 
-      const snapshot = yield* callSnapshot({ includeImage: false });
+      const snapshot = yield* callSnapshot({
+        includeImage: false,
+        diagnostics: ["console", "network", "actions"],
+      });
 
       expect(snapshot.isError).toBe(false);
-      const [identity, text, notice] = snapshot.content;
-      expect(identity?.type === "text" ? decodeJsonText(identity.text) : null).toEqual({
-        url: oversized.url,
-      });
+      const [text] = snapshot.content;
       expect(text?.type).toBe("text");
       const body = text?.type === "text" ? text.text : "";
       expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
@@ -459,12 +537,10 @@ it.effect("keeps the snapshot text under the agent's output ceiling", () =>
       expect(parsed.interactiveElements[3]?.name).toBe("Continue");
       expect(parsed.consoleEntries).toHaveLength(40);
       expect(parsed.consoleEntries[0]?.text).toBe("entry 60");
-      expect(notice?.type === "text" ? notice.text : "").toContain("accessibilityTree");
-      expect(notice?.type === "text" ? notice.text : "").toContain("60 older console entries");
-      // The structured result is untouched; only the text the agent reads is bounded.
-      expect(snapshot.structuredContent).toMatchObject({
-        accessibilityTree: oversized.accessibilityTree,
-      });
+      expect(body).toContain("accessibilityTree");
+      expect(body).toContain("60 older console entries");
+      // Direct native consumers select this value, including the omission notices.
+      expect(snapshot.structuredContent).toEqual(parsed);
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -480,9 +556,12 @@ it.effect("bounds the snapshot text even when nothing but logs and the title are
       };
       yield* serveSnapshots("mcp-bounded-logs-client", oversized);
 
-      const snapshot = yield* callSnapshot({ includeImage: false });
+      const snapshot = yield* callSnapshot({
+        includeImage: false,
+        diagnostics: ["console", "network", "actions"],
+      });
 
-      const [, text] = snapshot.content;
+      const [text] = snapshot.content;
       const body = text?.type === "text" ? text.text : "";
       expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
         McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
@@ -493,10 +572,30 @@ it.effect("bounds the snapshot text even when nothing but logs and the title are
       };
       expect(parsed.title.length).toBe(2_049);
       expect(parsed.consoleEntries[0]?.text.length).toBe(501);
-      const notice = snapshot.content[2];
-      const noticeText = notice?.type === "text" ? notice.text : "";
+      const noticeText = body;
       expect(noticeText).toContain("url or title after 2048 characters");
       expect(noticeText).toContain("console entries text after 500 characters");
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("bounds JSON escape expansion even after dropping every list", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* serveSnapshots("mcp-escaped-client", {
+        ...snapshotResult,
+        title: "\0".repeat(2_048),
+        visibleText: "\0".repeat(8_000),
+        interactiveElements: [],
+      });
+      const result = yield* callSnapshot({ includeImage: false });
+      const first = result.content[0];
+      expect(first?.type).toBe("text");
+      if (first?.type !== "text") return;
+      expect(Buffer.byteLength(first.text)).toBeLessThanOrEqual(
+        McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
+      );
+      expect(first.text).toContain("omitted to fit observation");
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -542,9 +641,12 @@ it.effect("sheds log entries before locators when every list is full", () =>
       };
       yield* serveSnapshots("mcp-full-logs-client", oversized);
 
-      const snapshot = yield* callSnapshot({ includeImage: false });
+      const snapshot = yield* callSnapshot({
+        includeImage: false,
+        diagnostics: ["console", "network", "actions"],
+      });
 
-      const [, text, notice] = snapshot.content;
+      const [text] = snapshot.content;
       const body = text?.type === "text" ? text.text : "";
       expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
         McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
@@ -560,8 +662,8 @@ it.effect("sheds log entries before locators when every list is full", () =>
       expect(
         parsed.consoleEntries.length + parsed.networkEntries.length + parsed.actionTimeline.length,
       ).toBeLessThan(120);
-      const noticeText = notice?.type === "text" ? notice.text : "";
-      expect(noticeText).toContain("40 of 40 actionTimeline");
+      const noticeText = body;
+      expect(noticeText).toContain("40 actionTimeline omitted");
       expect(noticeText).not.toMatch(/\d+ of \d+ interactiveElements/);
     }),
   ).pipe(Effect.provide(TestLayer)),
@@ -639,7 +741,7 @@ it.effect("registers annotated tools and preserves authenticated request context
         environmentId,
       });
       yield* Stream.runForEach(events, (event) => {
-        if (event.type === "connected") return Effect.void;
+        if (event.type !== "request") return Effect.void;
         routedRequests.push(event.request);
         return broker.respond({
           clientId: "mcp-test-client",
@@ -718,9 +820,7 @@ it.effect("registers annotated tools and preserves authenticated request context
         );
       expect(snapshot.isError).toBe(false);
       expect(snapshot.content.some((content) => content.type === "image")).toBe(true);
-      expect(snapshot.structuredContent).toMatchObject({
-        screenshot: { mimeType: "image/png", width: 10, height: 5 },
-      });
+      expect(snapshot.structuredContent).toBeUndefined();
       expect(routedRequests.find(({ operation }) => operation === "snapshot")?.tabId).toBe(
         alternateTabId,
       );

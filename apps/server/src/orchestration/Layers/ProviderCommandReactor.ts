@@ -931,6 +931,7 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly messageOrigin?: import("@t3tools/contracts").MessageOrigin;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
@@ -981,6 +982,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
+      messageOrigin: input.messageOrigin ?? { kind: "human" as const },
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
@@ -1550,6 +1552,7 @@ const make = Effect.gen(function* () {
         text: message.text,
         records: message.context?.records ?? [],
       }),
+      ...(event.payload.messageOrigin ? { messageOrigin: event.payload.messageOrigin } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }
@@ -1587,6 +1590,13 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    if (
+      (event.payload.turnId !== undefined &&
+        thread.session?.activeTurnId !== event.payload.turnId) ||
+      (event.payload.expectedUserMessageAt !== undefined &&
+        thread.latestUserMessageAt !== event.payload.expectedUserMessageAt)
+    )
+      return;
     const session = thread.session;
     if (!session || session.status === "stopped") {
       return yield* appendProviderFailureActivity({

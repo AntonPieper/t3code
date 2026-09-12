@@ -20,6 +20,7 @@ import {
   type PreviewOpenInput,
   type PreviewRefreshInput,
   type PreviewReportStatusInput,
+  type PreviewClaimHostInput,
   type PreviewResizeInput,
   FILL_PREVIEW_VIEWPORT,
   PreviewSessionLookupError,
@@ -47,6 +48,9 @@ export class PreviewManager extends Context.Service<
     readonly open: (input: PreviewOpenInput) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly navigate: (
       input: PreviewNavigateInput,
+    ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
+    readonly claimHost: (
+      input: PreviewClaimHostInput,
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly reportStatus: (input: PreviewReportStatusInput) => Effect.Effect<void, PreviewError>;
     readonly resize: (
@@ -128,6 +132,7 @@ const buildLoadingSnapshot = (input: {
 }): PreviewSessionSnapshot => ({
   threadId: input.threadId,
   tabId: input.tabId,
+  hostingClientId: null,
   navStatus: { _tag: "Loading", url: input.url, title: input.title },
   canGoBack: false,
   canGoForward: false,
@@ -145,6 +150,7 @@ const buildIdleSnapshot = (input: {
 }): PreviewSessionSnapshot => ({
   threadId: input.threadId,
   tabId: input.tabId,
+  hostingClientId: null,
   navStatus: { _tag: "Idle" },
   canGoBack: false,
   canGoForward: false,
@@ -227,7 +233,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       // session is born at the right size; older clients omit it and keep the
       // historical fill-panel behaviour.
       const viewport = input.viewport ?? FILL_PREVIEW_VIEWPORT;
-      const snapshot = input.url
+      const initialSnapshot = input.url
         ? buildLoadingSnapshot({
             threadId: input.threadId,
             tabId,
@@ -244,6 +250,11 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             profileId: input.profileId,
             updatedAt,
           });
+      const snapshot = {
+        ...initialSnapshot,
+        hostingClientId: input.hostingClientId ?? null,
+        environmentPort: input.environmentPort ?? null,
+      };
       yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
         Effect.gen(function* () {
           const revision = state.revision + 1;
@@ -284,6 +295,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             threadId: session.threadId,
             tabId: session.tabId,
             navStatus: { _tag: "Success", url, title: resolvedTitle },
+            hostingClientId: session.snapshot.hostingClientId,
             canGoBack: session.snapshot.canGoBack,
             canGoForward: session.snapshot.canGoForward,
             viewport: session.snapshot.viewport ?? FILL_PREVIEW_VIEWPORT,
@@ -308,6 +320,33 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     },
   );
 
+  const claimHost: PreviewManager["Service"]["claimHost"] = Effect.fn("PreviewManager.claimHost")(
+    function* (input) {
+      return yield* mutateExistingSession(input.threadId, input.tabId, (session) =>
+        Effect.gen(function* () {
+          if (session.snapshot.hostingClientId != null)
+            return { next: session, emit: null, result: session.snapshot };
+          const snapshot = {
+            ...session.snapshot,
+            hostingClientId: input.clientId,
+            updatedAt: yield* currentIsoTimestamp,
+          };
+          return {
+            next: { ...session, snapshot },
+            result: snapshot,
+            emit: {
+              type: "navigated" as const,
+              threadId: session.threadId,
+              tabId: session.tabId,
+              createdAt: snapshot.updatedAt,
+              snapshot,
+            },
+          };
+        }),
+      );
+    },
+  );
+
   const reportStatus: PreviewManager["Service"]["reportStatus"] = Effect.fn(
     "PreviewManager.reportStatus",
   )(function* (input) {
@@ -319,6 +358,11 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         const snapshot: PreviewSessionSnapshot = {
           threadId: session.threadId,
           tabId: session.tabId,
+          hostingClientId: session.snapshot.hostingClientId,
+          environmentPort:
+            input.environmentPort === undefined
+              ? session.snapshot.environmentPort
+              : input.environmentPort,
           navStatus: input.navStatus,
           canGoBack: input.canGoBack,
           canGoForward: input.canGoForward,
@@ -446,6 +490,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   );
 
   return PreviewManager.of({
+    claimHost,
     open,
     navigate,
     reportStatus,

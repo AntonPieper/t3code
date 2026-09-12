@@ -60,6 +60,9 @@ import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { deviceHubProxyRouteLayer } from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as PreviewVerification from "./preview/Verification.ts";
+import * as PreviewServers from "./preview/Servers.ts";
+import * as PreviewPortGateway from "./preview/PortGateway.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -493,6 +496,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderInstanceRegistryHydrationLive),
 ).pipe(
   Layer.provideMerge(AntigravityInstallation.layer),
+  Layer.provideMerge(Layer.mergeAll(PreviewLayerLive, PreviewAutomationBroker.layer)),
   // Shared native/canonical NDJSON writers used by both the per-instance
   // drivers (native stream, written from inside each `<X>Adapter`) and
   // `ProviderService` (canonical stream, written after event normalization).
@@ -527,7 +531,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
 );
 
-const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
+const RuntimeDependenciesLive = Layer.mergeAll(
+  PreviewServers.layer,
+  PreviewVerification.layer,
+).pipe(
+  Layer.provideMerge(RuntimeCoreDependenciesLive),
   // Misc.
   Layer.provideMerge(BackgroundLayerLive),
   Layer.provideMerge(ResourceDiagnosticsLayerLive),
@@ -560,6 +568,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     ),
     otlpTracesProxyRouteLayer,
     assetRouteLayer,
+    PreviewPortGateway.layer,
     attachmentUploadRouteLayer,
     deviceHubProxyRouteLayer,
     staticAndDevRouteLayer,

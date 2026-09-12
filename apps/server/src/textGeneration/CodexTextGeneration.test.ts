@@ -1,3 +1,4 @@
+import wireFixture from "../provider/testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -15,6 +16,7 @@ import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { writeFakeCli } from "../testUtils/fakeCli.ts";
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
@@ -36,96 +38,62 @@ interface FakeCodexInput {
   forbidReasoningEffort?: boolean;
   requireArg?: string;
   forbidArg?: string;
+  requireModel?: string;
   stdinMustContain?: string;
   stdinMustNotContain?: string;
 }
 
-// The stub walks argv the way the shell script it replaced did: `--image`,
-// `--config key=value`, and `--output-last-message <path>` are consumed, the
-// prompt arrives on stdin, and each check exits with its own code so a
-// failing test names the assertion that tripped.
+/** Native app-server peer exercises the helper's real typed subprocess boundary. */
 function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
-  const check = JSON.stringify({
-    requireImage: input.requireImage ?? false,
-    requireServiceTier: input.requireServiceTier ?? null,
-    requireReasoningEffort: input.requireReasoningEffort ?? null,
-    forbidReasoningEffort: input.forbidReasoningEffort ?? false,
-    requireArg: input.requireArg ?? null,
-    forbidArg: input.forbidArg ?? null,
-    stdinMustContain: input.stdinMustContain ?? null,
-    stdinMustNotContain: input.stdinMustNotContain ?? null,
-    stderr: input.stderr ?? null,
-    output: input.output,
-    exitCode: input.exitCode ?? 0,
-  });
+  const check = encodeJson(input);
+  const fixtureJson = encodeJson(wireFixture.responses);
   return Effect.gen(function* () {
     const path = yield* Path.Path;
     return writeFakeCli({
       directory: path.join(dir, "bin"),
       name: "codex",
-      source: [
-        'import * as NodeFS from "node:fs";',
-        `const check = ${check};`,
-        "const args = process.argv.slice(2);",
-        'const originalArgs = ` ${args.join(" ")} `;',
-        "let outputPath = null;",
-        "let seenImage = false;",
-        'let seenServiceTier = "";',
-        'let seenReasoningEffort = "";',
-        "for (let index = 0; index < args.length; index += 1) {",
-        '  if (args[index] === "--image") {',
-        "    index += 1;",
-        "    if (args[index]) seenImage = true;",
-        '  } else if (args[index] === "--config") {',
-        "    index += 1;",
-        '    const value = args[index] ?? "";',
-        '    if (value.startsWith("service_tier=")) seenServiceTier = value;',
-        '    if (value.startsWith("model_reasoning_effort=")) seenReasoningEffort = value;',
-        '  } else if (args[index] === "--output-last-message") {',
-        "    index += 1;",
-        "    outputPath = args[index] ?? null;",
-        "  }",
-        "}",
-        "const chunks = [];",
-        "for await (const chunk of process.stdin) chunks.push(chunk);",
-        'const stdinContent = Buffer.concat(chunks).toString("utf8");',
-        "function fail(message, code) {",
-        '  process.stderr.write(message + "\\n");',
-        "  process.exit(code);",
-        "}",
-        "if (check.requireArg !== null && !originalArgs.includes(` ${check.requireArg} `)) {",
-        '  fail("missing arg: " + check.requireArg, 8);',
-        "}",
-        "if (check.forbidArg !== null && originalArgs.includes(` ${check.forbidArg} `)) {",
-        '  fail("forbidden arg: " + check.forbidArg, 9);',
-        "}",
-        'if (check.requireImage && !seenImage) fail("missing --image input", 2);',
-        "if (",
-        "  check.requireServiceTier !== null &&",
-        '  seenServiceTier !== `service_tier="${check.requireServiceTier}"`',
-        ") {",
-        '  fail("unexpected service tier config: " + seenServiceTier, 5);',
-        "}",
-        "if (",
-        "  check.requireReasoningEffort !== null &&",
-        '  seenReasoningEffort !== `model_reasoning_effort="${check.requireReasoningEffort}"`',
-        ") {",
-        '  fail("unexpected reasoning effort config: " + seenReasoningEffort, 6);',
-        "}",
-        "if (check.forbidReasoningEffort && seenReasoningEffort.length > 0) {",
-        '  fail("reasoning effort config should be omitted: " + seenReasoningEffort, 7);',
-        "}",
-        "if (check.stdinMustContain !== null && !stdinContent.includes(check.stdinMustContain)) {",
-        '  fail("stdin missing expected content", 3);',
-        "}",
-        "if (check.stdinMustNotContain !== null && stdinContent.includes(check.stdinMustNotContain)) {",
-        '  fail("stdin contained forbidden content", 4);',
-        "}",
-        'if (check.stderr !== null) process.stderr.write(check.stderr + "\\n");',
-        'if (outputPath !== null) NodeFS.writeFileSync(outputPath, check.output + "\\n");',
-        "process.exitCode = check.exitCode;",
-        "",
-      ].join("\n"),
+      source: `
+import * as Readline from "node:readline";
+const check = ${check};
+const fixture = ${fixtureJson};
+const args = " " + process.argv.slice(2).join(" ") + " ";
+const write = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let opened;
+Readline.createInterface({input: process.stdin}).on("line", (line) => {
+  const {id, method, params} = JSON.parse(line);
+  if (id === undefined) return;
+  const fail = (message) => write({id, error: {code: -32000, message}});
+  if (check.requireArg && !args.includes(" " + check.requireArg + " ")) return fail("missing arg " + check.requireArg);
+  if (check.forbidArg && args.includes(" " + check.forbidArg + " ")) return fail("forbidden arg " + check.forbidArg);
+  if (method === "initialize") return write({id, result: {codexHome: "/tmp", platformFamily: "unix", platformOs: "macos", userAgent: "codex/0.154.0"}});
+  if (method === "config/read") return write({id, result: {config: {mcp_servers: {unrelated: {command: "never-start-me"}}}, origins: {}}});
+  if (method === "thread/start") {
+    opened = params;
+    if (check.requireModel && params.model !== check.requireModel) return fail("Wrong thread model");
+    if (params.config.mcp_servers.unrelated.enabled !== false) return fail("Unrelated MCP was not disabled");
+    if (params.config["features.plugins"] !== false || params.config["features.apps"] !== false) return fail("Unrelated plugins/apps were not disabled");
+    if (params.config["project_doc_max_bytes"] === 0 && !params.cwd.includes("t3code-codex-metadata-")) return fail("Expected neutral metadata directory");
+    return write({id, result: fixture.threadStart});
+  }
+  if (method === "turn/start") {
+    if (check.requireModel && params.model !== check.requireModel) return fail("Wrong turn model");
+    const prompt = params.input.filter(x => x.type === "text").map(x => x.text).join("\\n");
+    if (check.requireImage && !params.input.some(x => x.type === "localImage")) return fail("Missing image");
+    if (check.requireServiceTier && params.serviceTier !== check.requireServiceTier) return fail("Wrong service tier");
+    if (check.requireReasoningEffort && params.effort !== check.requireReasoningEffort) return fail("Wrong effort");
+    if (check.forbidReasoningEffort && params.effort) return fail("Unexpected effort");
+    if (check.stdinMustContain && !prompt.includes(check.stdinMustContain)) return fail("Missing prompt content");
+    if (check.stdinMustNotContain && prompt.includes(check.stdinMustNotContain)) return fail("Forbidden prompt content");
+    if (check.exitCode) return fail(check.stderr || "Codex execution failed");
+    write({id, result: fixture.turnStart});
+    const threadId = fixture.threadStart.thread.id;
+    write({method: "item/completed", params: {completedAtMs: 1, threadId, turnId: fixture.turnStart.turn.id, item: {type: "agentMessage", id: "answer", text: check.output}}});
+    write({method: "turn/completed", params: {threadId, turn: {...fixture.turnStart.turn, status: "completed"}}});
+    return;
+  }
+  fail("Unexpected method " + method);
+});
+`,
     });
   });
 }
@@ -166,8 +134,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         {
           output: JSON.stringify({ title: "Bedrock title" }),
           models: ["openai.gpt-5.6-luna"],
-          requireArg: "--model openai.gpt-5.6-luna",
-          forbidArg: "--model gpt-5.6-luna",
+          requireModel: "openai.gpt-5.6-luna",
         },
         (textGeneration) =>
           Effect.gen(function* () {
@@ -266,7 +233,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           body: "",
         }),
         launchArgs: "--enable settings-feature",
-        environment: { T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --listen off " },
+        environment: { ...process.env, T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --listen off " },
         requireArg: "--strict-config",
         forbidArg: "settings-feature",
       },
@@ -583,7 +550,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           expect(Result.isFailure(result)).toBe(true);
           if (Result.isFailure(result)) {
             expect(result.failure).toBeInstanceOf(TextGenerationError);
-            expect(result.failure.message).toContain("missing --image input");
+            expect(result.failure.message).toContain("Missing image");
           }
         }),
     ),
@@ -640,7 +607,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           if (Result.isFailure(result)) {
             expect(result.failure).toBeInstanceOf(TextGenerationError);
             expect(result.failure.message).toContain(
-              "Codex CLI command failed: codex execution failed",
+              "Codex metadata request failed: codex execution failed",
             );
           }
         }),

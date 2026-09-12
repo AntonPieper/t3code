@@ -172,6 +172,25 @@ const targetNotEditableDiagnostics = (
   };
 };
 
+export class PreviewAutomationTargetNotFoundHostError extends Schema.TaggedError<PreviewAutomationTargetNotFoundHostError>()(
+  "PreviewAutomationTargetNotFoundHostError",
+  {
+    requestId: TrimmedNonEmptyString,
+    operation: PreviewAutomationOperation,
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    tabId: Schema.NullOr(PreviewTabId),
+  },
+) {
+  get responseTag() {
+    return "PreviewAutomationTargetNotFoundError" as const;
+  }
+
+  override get message(): string {
+    return `Preview automation ${this.operation} could not find the target. Take a fresh snapshot; portable locators do not enter iframe documents.`;
+  }
+}
+
 export class PreviewAutomationOperationError extends Schema.TaggedError<PreviewAutomationOperationError>()(
   "PreviewAutomationOperationError",
   {
@@ -187,6 +206,20 @@ export class PreviewAutomationOperationError extends Schema.TaggedError<PreviewA
     input: PreviewAutomationOperationContext & { readonly cause: unknown },
   ): PreviewAutomationHostError {
     if (isPreviewAutomationHostError(input.cause)) return input.cause;
+    if (
+      typeof input.cause === "object" &&
+      input.cause !== null &&
+      "_tag" in input.cause &&
+      input.cause._tag === "PreviewAutomationTargetNotFoundError"
+    ) {
+      return new PreviewAutomationTargetNotFoundHostError({
+        requestId: input.requestId,
+        operation: input.operation,
+        environmentId: input.environmentId,
+        threadId: input.threadId,
+        tabId: input.tabId,
+      });
+    }
     const diagnostics = targetNotEditableDiagnostics(input.cause);
     return diagnostics
       ? new PreviewAutomationTargetNotEditableHostError({
@@ -220,6 +253,7 @@ export const PreviewAutomationHostError = Schema.Union([
   PreviewAutomationTargetUnavailableError,
   PreviewAutomationRecordingNotActiveError,
   PreviewAutomationTargetNotEditableHostError,
+  PreviewAutomationTargetNotFoundHostError,
   PreviewAutomationOperationError,
 ]);
 export type PreviewAutomationHostError = typeof PreviewAutomationHostError.Type;

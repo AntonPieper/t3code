@@ -46,8 +46,12 @@ const queueBrowserViewportMutation = <A>(
 export function runBrowserViewportMutation<A>(
   tabId: string,
   mutation: () => Promise<A>,
+  signal?: AbortSignal,
 ): Promise<A> {
-  return queueBrowserViewportMutation(tabId, mutation).execution;
+  return queueBrowserViewportMutation(tabId, () => {
+    signal?.throwIfAborted();
+    return mutation();
+  }).execution;
 }
 
 const runHandlerWithTimeout = (tabId: string, operation: Promise<void>): Promise<void> => {

@@ -9,6 +9,39 @@ import {
 } from "./browserViewportActions";
 
 describe("browserViewportActions", () => {
+  it("drops cancelled automation queued behind a visible viewport commit", async () => {
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = {
+      promise: new Promise<void>((resolve) => {
+        enter = resolve;
+      }),
+      resolve: () => enter(),
+    };
+    const proceed = {
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+      resolve: () => release(),
+    };
+    const unsubscribe = subscribeBrowserViewportChange("tab-cancel", async () => {
+      entered.resolve();
+      await proceed.promise;
+    });
+    const first = commitBrowserViewportChange("tab-cancel", { _tag: "fill" });
+    await entered.promise;
+    const controller = new AbortController();
+    const mutation = vi.fn(async () => undefined);
+    const queued = runBrowserViewportMutation("tab-cancel", mutation, controller.signal);
+    const rejected = expect(queued).rejects.toThrow();
+    controller.abort();
+    proceed.resolve();
+    await first;
+    await rejected;
+    expect(mutation).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
   it("routes drag commits to the visible tab handler and cleans up exactly that handler", async () => {
     const first = vi.fn(async () => undefined);
     const second = vi.fn(async () => undefined);
